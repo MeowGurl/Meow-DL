@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const INSTAGRAM_GRAPHQL_URL = 'https://www.instagram.com/api/graphql';
-const INSTAGRAM_STORIES_URL = 'https://i.instagram.com/api/v1/feed/user/';
 const COOKIE_FILE_PATH = join(process.cwd(), 'api', 'insta.txt');
 
 const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
@@ -11,7 +10,7 @@ const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
     'Accept-Language': 'en-US,en;q=0.5',
     'Content-Type': 'application/x-www-form-urlencoded',
     'X-FB-Friendly-Name': 'PolarisPostActionLoadPostQueryQuery',
-    'X-CSRFToken': 'Gs50xX-0t-hz_2bezC1yWj',
+    'X-CSRFToken': '6vqNkYGzict4JZSu8XZkCoW7iHJohsXD',
     'X-IG-App-ID': '1217981644879628',
     'X-FB-LSD': 'AVqbxe3J_YA',
     'X-ASBD-ID': '129477',
@@ -87,7 +86,8 @@ type LocationInfo = {
 };
 
 export type ExtractionResult = {
-    status: 'success' | 'not_found' | 'fetch_error' | 'invalid_url';
+    status: 'success' | 'not_found' | 'fetch_error' | 'invalid_url' | 'blocked';
+    error_details?: string;
     author?: string;
     owner?: OwnerInfo;
     title?: string;
@@ -169,11 +169,6 @@ async function resolveRedirectUrl(url: string): Promise<string> {
 function getPostShortcode(url: string): string | null {
     const match = url.match(SHORTCODE_REGEX);
     return match ? match[1] : null;
-}
-
-function getProfileUsername(url: string): string | null {
-    const match = url.match(PROFILE_REGEX);
-    return match && match[1] !== 'p' && match[1] !== 'reel' && match[1] !== 'reels' ? match[1] : null;
 }
 
 function generateRequestBody(shortcode: string, userId = '0'): string {
@@ -282,12 +277,38 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'fetch_error',
+                error_details: `HTTP ${response.status} ${response.statusText}`,
                 timings,
             };
         }
 
         const processStartTime = performance.now();
-        const jsonResponse = await response.json() as any;
+        const responseText = await response.text();
+
+        // Safely parse JSON. If it fails, Instagram likely returned HTML (blocked/login required)
+        let jsonResponse: any;
+        try {
+            jsonResponse = JSON.parse(responseText);
+        } catch (e) {
+            timings.processTime = performance.now() - processStartTime;
+            timings.totalTime = performance.now() - totalStartTime;
+            
+            // Check if it's a login redirect or HTML block page
+            if (responseText.includes('<!DOCTYPE html>') || responseText.includes('Login • Instagram')) {
+                return {
+                    status: 'blocked',
+                    error_details: 'Instagram returned an HTML page instead of JSON. The provided cookie might be expired, rate-limited, or requires a login challenge.',
+                    timings
+                };
+            }
+            
+            return {
+                status: 'fetch_error',
+                error_details: 'Failed to parse JSON response from Instagram.',
+                timings
+            };
+        }
+
         const mediaData = jsonResponse.data?.xdt_shortcode_media;
 
         if (!mediaData) {
@@ -295,6 +316,7 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
+                error_details: 'The media was not found or is private.',
                 timings,
             };
         }
@@ -305,6 +327,7 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
+                error_details: 'No downloadable media found in the payload.',
                 timings,
             };
         }
@@ -378,6 +401,7 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
         timings.totalTime = performance.now() - totalStartTime;
         return {
             status: 'fetch_error',
+            error_details: error instanceof Error ? error.message : String(error),
             timings,
         };
     }
