@@ -1,8 +1,12 @@
-import { performance } from 'perf_hooks';
+import { performance } from 'node:perf_hooks';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const INSTAGRAM_GRAPHQL_URL = 'https://www.instagram.com/api/graphql';
-const INSTAGRAM_HEADERS = {
-    'Accept': '/',
+const COOKIE_FILE_PATH = join(process.cwd(), 'api', 'insta.txt');
+
+const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
+    'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.5',
     'Content-Type': 'application/x-www-form-urlencoded',
     'X-FB-Friendly-Name': 'PolarisPostActionLoadPostQueryQuery',
@@ -43,7 +47,6 @@ const STATIC_REQUEST_PARAMS = {
 };
 
 const STATIC_REQUEST_BODY_PART = new URLSearchParams(STATIC_REQUEST_PARAMS).toString();
-
 const SHORTCODE_REGEX = /(?:p|reel|reels|tv)\/([a-zA-Z0-9_-]+)/;
 
 type IG_GraphQLResponseDto = {
@@ -81,12 +84,34 @@ export type ExtractionResult = {
     };
 };
 
+async function getInstagramHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { ...BASE_INSTAGRAM_HEADERS };
+
+    try {
+        const rawCookie = (await readFile(COOKIE_FILE_PATH, 'utf-8'))
+            .replace(/\r?\n|\r/g, ' ')
+            .trim();
+
+        if (rawCookie) {
+            headers['Cookie'] = rawCookie;
+
+            const csrfMatch = rawCookie.match(/csrftoken=([^;\s]+)/);
+            if (csrfMatch?.[1]) {
+                headers['X-CSRFToken'] = csrfMatch[1];
+            }
+        }
+    } catch {
+    }
+
+    return headers;
+}
+
 function getPostShortcode(url: string): string | null {
     const match = url.match(SHORTCODE_REGEX);
     return match ? match[1] : null;
 }
 
-function generateRequestBody(shortcode: string): string {
+function generateRequestBody(shortcode: string, userId = '0'): string {
     const variables = {
         shortcode,
         fetch_comment_count: 40,
@@ -100,34 +125,43 @@ function generateRequestBody(shortcode: string): string {
         hoisted_comment_id: null,
         hoisted_reply_id: null,
     };
-    const dynamicPart = new URLSearchParams({
-        variables: JSON.stringify(variables)
-    }).toString();
-    return `${STATIC_REQUEST_BODY_PART}&${dynamicPart}`;
+
+    const params = new URLSearchParams(STATIC_REQUEST_BODY_PART);
+    if (userId && userId !== '0') {
+        params.set('av', userId);
+        params.set('__user', userId);
+    }
+    params.set('variables', JSON.stringify(variables));
+
+    return params.toString();
 }
 
 function extractMediaFromResponse(mediaData: any): CleanedMedia[] {
     if (!mediaData) return [];
+
     const carouselEdges = mediaData.edge_sidecar_to_children?.edges;
     if (carouselEdges) {
         return carouselEdges.flatMap((edge: any) => extractMediaFromResponse(edge.node));
     }
+
     if (mediaData.is_video) {
         return mediaData.video_url ? [{
             type: 'video',
             url: mediaData.video_url
         }] : [];
     }
+
     const highestQualityImageSrc = mediaData.display_resources?.at(-1)?.src;
     const displayUrl = mediaData.display_url;
     const finalImageUrl = highestQualityImageSrc || displayUrl;
+
     return finalImageUrl ? [{
         type: 'photo',
         url: finalImageUrl
     }] : [];
 }
 
-export async function scrapeInstagram(url: string): Promise < ExtractionResult > {
+export async function scrapeInstagram(url: string): Promise<ExtractionResult> {
     const timings = {
         fetchTime: 0,
         processTime: 0,
@@ -135,6 +169,7 @@ export async function scrapeInstagram(url: string): Promise < ExtractionResult >
     };
     const totalStartTime = performance.now();
     const shortcode = getPostShortcode(url);
+
     if (!shortcode) {
         timings.totalTime = performance.now() - totalStartTime;
         return {
@@ -145,10 +180,14 @@ export async function scrapeInstagram(url: string): Promise < ExtractionResult >
 
     try {
         const fetchStartTime = performance.now();
+        const headers = await getInstagramHeaders();
+        const userIdMatch = headers['Cookie']?.match(/ds_user_id=([^;\s]+)/);
+        const userId = userIdMatch?.[1] || '0';
+
         const response = await fetch(INSTAGRAM_GRAPHQL_URL, {
             method: 'POST',
-            headers: INSTAGRAM_HEADERS,
-            body: generateRequestBody(shortcode),
+            headers,
+            body: generateRequestBody(shortcode, userId),
         });
         timings.fetchTime = performance.now() - fetchStartTime;
 
@@ -208,15 +247,15 @@ export async function scrapeInstagram(url: string): Promise < ExtractionResult >
             title: captionText,
             thumbnail: mediaData.display_url,
             media: mediaUrls,
-            likeCount: likeCount,
-            commentCount: commentCount,
-            viewCount: viewCount,
-            timestamp: timestamp,
-            comments: comments,
+            likeCount,
+            commentCount,
+            viewCount,
+            timestamp,
+            comments,
             timings,
         };
     } catch (error) {
-        console.error("An unexpected error occurred during scraping:", error);
+        console.error('An unexpected error occurred during scraping:', error);
         timings.totalTime = performance.now() - totalStartTime;
         return {
             status: 'fetch_error',
