@@ -7,48 +7,16 @@ const COOKIE_FILE_PATH = join(process.cwd(), 'api', 'insta.txt');
 
 const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
     'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Language': 'en-US,en;q=0.9',
     'Content-Type': 'application/x-www-form-urlencoded',
-    'X-FB-Friendly-Name': 'PolarisPostActionLoadPostQueryQuery',
-    'X-CSRFToken': '6vqNkYGzict4JZSu8XZkCoW7iHJohsXD',
-    'X-IG-App-ID': '1217981644879628',
-    'X-FB-LSD': 'AVqbxe3J_YA',
-    'X-ASBD-ID': '129477',
+    'X-IG-App-ID': '936619743392459',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
-const STATIC_REQUEST_PARAMS = {
-    av: '0',
-    __d: 'www',
-    __user: '0',
-    __a: '1',
-    __req: '3',
-    __hs: '19624.HYP:instagram_web_pkg.2.1..0.0',
-    dpr: '3',
-    __ccg: 'UNKNOWN',
-    __rev: '1008824440',
-    __s: 'xf44ne:zhh75g:xr51e7',
-    __hsi: '7282217488877343271',
-    __dyn: '7xeUmwlEnwn8K2WnFw9-2i5U4e0yoW3q32360CEbo1nEhw2nVE4W0om78b87C0yE5ufz81s8hwGwQwoEcE7O2l0Fwqo31w9a9x-0z8-U2zxe2GewGwso88cobEaU2eUlwhEe87q7-0iK2S3qazo7u1xwIw8O321LwTwKG1pg661pwr86C1mwraCg',
-    __csr: 'gZ3yFmJkillQvV6ybimnG8AmhqujGbLADgjyEOWz49z9XDlAXBJpC7Wy-vQTSvUGWGh5u8KibG44dBiigrgjDxGjU0150Q0848azk48N09C02IR0go4SaR70r8owyg9pU0V23hwiA0LQczA48S0f-x-27o05NG0fkw',
-    __comet_req: '7',
-    lsd: 'AVqbxe3J_YA',
-    jazoest: '2957',
-    __spin_r: '1008824440',
-    __spin_b: 'trunk',
-    __spin_t: '1695523385',
-    fb_api_caller_class: 'RelayModern',
-    fb_api_req_friendly_name: 'PolarisPostActionLoadPostQueryQuery',
-    server_timestamps: 'true',
-    doc_id: '10015901848480474',
-};
-
-const STATIC_REQUEST_BODY_PART = new URLSearchParams(STATIC_REQUEST_PARAMS).toString();
 const SHORTCODE_REGEX = /(?:p|reel|reels|tv)\/([a-zA-Z0-9_-]+)/;
-const PROFILE_REGEX = /instagram\.com\/([a-zA-Z0-9_.]+)(?:\/)?$/;
 
 type CleanedMedia = {
     type: 'video' | 'photo';
@@ -80,11 +48,6 @@ type MusicInfo = {
     isOriginal?: boolean;
 };
 
-type LocationInfo = {
-    name?: string;
-    slug?: string;
-};
-
 export type ExtractionResult = {
     status: 'success' | 'not_found' | 'fetch_error' | 'invalid_url' | 'blocked';
     error_details?: string;
@@ -100,7 +63,6 @@ export type ExtractionResult = {
     hashtags?: string[];
     mentions?: string[];
     music?: MusicInfo;
-    location?: LocationInfo;
     comments?: Comment[];
     cached?: boolean;
     timings: {
@@ -148,16 +110,14 @@ async function getRotatedInstagramHeaders(): Promise<Record<string, string>> {
 }
 
 async function resolveRedirectUrl(url: string): Promise<string> {
-    if (!url.includes('/share/')) {
-        return url;
-    }
+    if (!url.includes('/share/')) return url;
 
     try {
         const res = await fetch(url, {
             method: 'HEAD',
             redirect: 'follow',
             headers: {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                'User-Agent': BASE_INSTAGRAM_HEADERS['User-Agent'],
             },
         });
         return res.url || url;
@@ -171,7 +131,7 @@ function getPostShortcode(url: string): string | null {
     return match ? match[1] : null;
 }
 
-function generateRequestBody(shortcode: string, userId = '0'): string {
+function generateRequestBody(shortcode: string): string {
     const variables = {
         shortcode,
         fetch_comment_count: 40,
@@ -186,11 +146,8 @@ function generateRequestBody(shortcode: string, userId = '0'): string {
         hoisted_reply_id: null,
     };
 
-    const params = new URLSearchParams(STATIC_REQUEST_BODY_PART);
-    if (userId && userId !== '0') {
-        params.set('av', userId);
-        params.set('__user', userId);
-    }
+    const params = new URLSearchParams();
+    params.set('doc_id', '10015901848480474');
     params.set('variables', JSON.stringify(variables));
 
     return params.toString();
@@ -216,8 +173,7 @@ function extractMediaFromResponse(mediaData: any): CleanedMedia[] {
     }
 
     const highestQualityImageSrc = mediaData.display_resources?.at(-1)?.src;
-    const displayUrl = mediaData.display_url;
-    const finalImageUrl = highestQualityImageSrc || displayUrl;
+    const finalImageUrl = highestQualityImageSrc || mediaData.display_url;
 
     return finalImageUrl ? [{
         type: 'photo',
@@ -244,48 +200,29 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
 
     if (!shortcode) {
         timings.totalTime = performance.now() - totalStartTime;
-        return {
-            status: 'invalid_url',
-            timings,
-        };
+        return { status: 'invalid_url', timings };
     }
 
     const cached = postCache.get(shortcode);
     if (cached && cached.expires > Date.now()) {
         timings.totalTime = performance.now() - totalStartTime;
-        return {
-            ...cached.result,
-            cached: true,
-            timings,
-        };
+        return { ...cached.result, cached: true, timings };
     }
 
     try {
         const fetchStartTime = performance.now();
         const headers = await getRotatedInstagramHeaders();
-        const userIdMatch = headers['Cookie']?.match(/ds_user_id=([^;\s]+)/);
-        const userId = userIdMatch?.[1] || '0';
 
         const response = await fetch(INSTAGRAM_GRAPHQL_URL, {
             method: 'POST',
             headers,
-            body: generateRequestBody(shortcode, userId),
+            body: generateRequestBody(shortcode),
         });
         timings.fetchTime = performance.now() - fetchStartTime;
-
-        if (!response.ok) {
-            timings.totalTime = performance.now() - totalStartTime;
-            return {
-                status: 'fetch_error',
-                error_details: `HTTP ${response.status} ${response.statusText}`,
-                timings,
-            };
-        }
 
         const processStartTime = performance.now();
         const responseText = await response.text();
 
-        // Safely parse JSON. If it fails, Instagram likely returned HTML (blocked/login required)
         let jsonResponse: any;
         try {
             jsonResponse = JSON.parse(responseText);
@@ -293,18 +230,16 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.processTime = performance.now() - processStartTime;
             timings.totalTime = performance.now() - totalStartTime;
             
-            // Check if it's a login redirect or HTML block page
-            if (responseText.includes('<!DOCTYPE html>') || responseText.includes('Login • Instagram')) {
-                return {
-                    status: 'blocked',
-                    error_details: 'Instagram returned an HTML page instead of JSON. The provided cookie might be expired, rate-limited, or requires a login challenge.',
-                    timings
-                };
+            let blockReason = 'Instagram returned a non-JSON response.';
+            if (responseText.includes('Login • Instagram')) {
+                blockReason = 'Login required. Cookie is expired or missing.';
+            } else if (responseText.includes('challenge')) {
+                blockReason = 'Account checkpoint/challenge triggered by Render IP.';
             }
-            
+
             return {
-                status: 'fetch_error',
-                error_details: 'Failed to parse JSON response from Instagram.',
+                status: 'blocked',
+                error_details: blockReason,
                 timings
             };
         }
@@ -316,7 +251,7 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
-                error_details: 'The media was not found or is private.',
+                error_details: 'The media was not found, or the account is private.',
                 timings,
             };
         }
@@ -354,14 +289,6 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             };
         }
 
-        let locInfo: LocationInfo | undefined = undefined;
-        if (mediaData.location) {
-            locInfo = {
-                name: mediaData.location.name,
-                slug: mediaData.location.slug,
-            };
-        }
-
         const comments: Comment[] = (mediaData.edge_media_to_parent_comment?.edges || [])
             .slice(0, 10)
             .map((edge: any) => ({
@@ -388,7 +315,6 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             hashtags,
             mentions,
             music: musicInfo,
-            location: locInfo,
             comments,
             cached: false,
             timings,
@@ -397,7 +323,6 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
         postCache.set(shortcode, { result, expires: Date.now() + CACHE_TTL_MS });
         return result;
     } catch (error) {
-        console.error('Instagram Scraper Error:', error);
         timings.totalTime = performance.now() - totalStartTime;
         return {
             status: 'fetch_error',
