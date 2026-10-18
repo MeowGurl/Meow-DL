@@ -57,8 +57,8 @@ const DOWNLOAD_CHUNK_SIZE_MB = 1;
 const IDLE_RESTART_DELAY_MS = 5000;
 const SEARCH_CACHE_TTL = 5 * 60 * 60 * 1000;
 const COOKIE_FILE_PATH = "cookies.txt";
-const ADMIN_USER = "PriyanshiKaurJi";
-const ADMIN_PASS = "787957";
+const ADMIN_USER = process.env.USERNAME || "";
+const ADMIN_PASS = process.env.PASSWORD || "";
 const TUNNEL_LINK_EXPIRATION_HOURS = 5;
 const REMUXED_FILE_CACHE_SECONDS = 300;
 const PO_REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
@@ -1514,9 +1514,19 @@ const app = new Elysia()
 
     console.log("API startup complete.");
   })
+  .get("/admin", () => new Response(Bun.file("public/admin.html")))
+  .get("/admin/", () => new Response(Bun.file("public/admin.html")))
   .group("/admin", (admin) =>
     admin
       .onBeforeHandle(({ request, set }) => {
+        if (!ADMIN_USER || !ADMIN_PASS) {
+          set.status = 500;
+          return {
+            success: false,
+            error: "Server admin credentials are not configured in .env",
+          };
+        }
+
         const auth = request.headers.get("Authorization");
         const expected = `Basic ${btoa(`${ADMIN_USER}:${ADMIN_PASS}`)}`;
 
@@ -1528,7 +1538,6 @@ const app = new Elysia()
           };
         }
       })
-      .get("/", () => new Response(Bun.file("public/admin.html")))
       .get("/stats", () => {
         const memory = process.memoryUsage();
         const protection = ProtectionManager.getStats();
@@ -1556,7 +1565,7 @@ const app = new Elysia()
 
         return {
           success: true,
-          message: "IP blocked",
+          message: `IP ${body.ip} blocked`,
         };
       })
       .post("/unblock", ({ body, set }: any) => {
@@ -1572,7 +1581,7 @@ const app = new Elysia()
 
         return {
           success: true,
-          message: "IP unblocked",
+          message: `IP ${body.ip} unblocked`,
         };
       })
       .post("/clear-cache", async () => {
