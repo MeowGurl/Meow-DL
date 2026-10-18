@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const INSTAGRAM_GRAPHQL_URL = 'https://www.instagram.com/api/graphql';
+const INSTAGRAM_STORIES_URL = 'https://i.instagram.com/api/v1/feed/user/';
 const COOKIE_FILE_PATH = join(process.cwd(), 'api', 'insta.txt');
 
 const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
@@ -48,16 +49,15 @@ const STATIC_REQUEST_PARAMS = {
 
 const STATIC_REQUEST_BODY_PART = new URLSearchParams(STATIC_REQUEST_PARAMS).toString();
 const SHORTCODE_REGEX = /(?:p|reel|reels|tv)\/([a-zA-Z0-9_-]+)/;
-
-type IG_GraphQLResponseDto = {
-    data?: {
-        xdt_shortcode_media?: any;
-    };
-};
+const PROFILE_REGEX = /instagram\.com\/([a-zA-Z0-9_.]+)(?:\/)?$/;
 
 type CleanedMedia = {
     type: 'video' | 'photo';
     url: string;
+    thumbnail?: string;
+    width?: number;
+    height?: number;
+    duration?: number;
 };
 
 type Comment = {
@@ -66,9 +66,30 @@ type Comment = {
     timestamp: number;
 };
 
+type OwnerInfo = {
+    username: string;
+    fullName?: string;
+    profilePicUrl?: string;
+    isVerified?: boolean;
+    followersCount?: number;
+};
+
+type MusicInfo = {
+    title?: string;
+    artist?: string;
+    audioUrl?: string;
+    isOriginal?: boolean;
+};
+
+type LocationInfo = {
+    name?: string;
+    slug?: string;
+};
+
 export type ExtractionResult = {
     status: 'success' | 'not_found' | 'fetch_error' | 'invalid_url';
     author?: string;
+    owner?: OwnerInfo;
     title?: string;
     thumbnail?: string;
     media?: CleanedMedia[];
@@ -76,7 +97,12 @@ export type ExtractionResult = {
     commentCount?: number;
     viewCount?: number;
     timestamp?: number;
+    hashtags?: string[];
+    mentions?: string[];
+    music?: MusicInfo;
+    location?: LocationInfo;
     comments?: Comment[];
+    cached?: boolean;
     timings: {
         fetchTime: number;
         processTime: number;
@@ -84,31 +110,70 @@ export type ExtractionResult = {
     };
 };
 
-async function getInstagramHeaders(): Promise<Record<string, string>> {
+const postCache = new Map<string, { result: ExtractionResult; expires: number }>();
+const CACHE_TTL_MS = 15 * 60 * 1000;
+
+let cookieLinesCache: string[] = [];
+let cookieCacheExpires = 0;
+let cookieRoundRobinIndex = 0;
+
+async function getRotatedInstagramHeaders(): Promise<Record<string, string>> {
     const headers: Record<string, string> = { ...BASE_INSTAGRAM_HEADERS };
 
-    try {
-        const rawCookie = (await readFile(COOKIE_FILE_PATH, 'utf-8'))
-            .replace(/\r?\n|\r/g, ' ')
-            .trim();
-
-        if (rawCookie) {
-            headers['Cookie'] = rawCookie;
-
-            const csrfMatch = rawCookie.match(/csrftoken=([^;\s]+)/);
-            if (csrfMatch?.[1]) {
-                headers['X-CSRFToken'] = csrfMatch[1];
-            }
+    if (Date.now() > cookieCacheExpires) {
+        try {
+            const rawFile = await readFile(COOKIE_FILE_PATH, 'utf-8');
+            cookieLinesCache = rawFile
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => line && !line.startsWith('#'));
+            cookieCacheExpires = Date.now() + 60 * 1000;
+        } catch {
+            cookieLinesCache = [];
         }
-    } catch {
+    }
+
+    if (cookieLinesCache.length > 0) {
+        const selectedCookie = cookieLinesCache[cookieRoundRobinIndex % cookieLinesCache.length];
+        cookieRoundRobinIndex++;
+
+        headers['Cookie'] = selectedCookie;
+        const csrfMatch = selectedCookie.match(/csrftoken=([^;\s]+)/);
+        if (csrfMatch?.[1]) {
+            headers['X-CSRFToken'] = csrfMatch[1];
+        }
     }
 
     return headers;
 }
 
+async function resolveRedirectUrl(url: string): Promise<string> {
+    if (!url.includes('/share/')) {
+        return url;
+    }
+
+    try {
+        const res = await fetch(url, {
+            method: 'HEAD',
+            redirect: 'follow',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+            },
+        });
+        return res.url || url;
+    } catch {
+        return url;
+    }
+}
+
 function getPostShortcode(url: string): string | null {
     const match = url.match(SHORTCODE_REGEX);
     return match ? match[1] : null;
+}
+
+function getProfileUsername(url: string): string | null {
+    const match = url.match(PROFILE_REGEX);
+    return match && match[1] !== 'p' && match[1] !== 'reel' && match[1] !== 'reels' ? match[1] : null;
 }
 
 function generateRequestBody(shortcode: string, userId = '0'): string {
@@ -147,7 +212,11 @@ function extractMediaFromResponse(mediaData: any): CleanedMedia[] {
     if (mediaData.is_video) {
         return mediaData.video_url ? [{
             type: 'video',
-            url: mediaData.video_url
+            url: mediaData.video_url,
+            thumbnail: mediaData.display_url,
+            width: mediaData.dimensions?.width,
+            height: mediaData.dimensions?.height,
+            duration: mediaData.video_duration,
         }] : [];
     }
 
@@ -157,30 +226,48 @@ function extractMediaFromResponse(mediaData: any): CleanedMedia[] {
 
     return finalImageUrl ? [{
         type: 'photo',
-        url: finalImageUrl
+        url: finalImageUrl,
+        thumbnail: finalImageUrl,
+        width: mediaData.dimensions?.width,
+        height: mediaData.dimensions?.height,
     }] : [];
 }
 
-export async function scrapeInstagram(url: string): Promise<ExtractionResult> {
-    const timings = {
-        fetchTime: 0,
-        processTime: 0,
-        totalTime: 0
-    };
+function parseHashtagsAndMentions(text: string): { hashtags: string[]; mentions: string[] } {
+    if (!text) return { hashtags: [], mentions: [] };
+    const hashtags = Array.from(text.matchAll(/#([a-zA-Z0-9_]+)/g)).map((m) => m[1]);
+    const mentions = Array.from(text.matchAll(/@([a-zA-Z0-9_.]+)/g)).map((m) => m[1]);
+    return { hashtags, mentions };
+}
+
+export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult> {
+    const timings = { fetchTime: 0, processTime: 0, totalTime: 0 };
     const totalStartTime = performance.now();
-    const shortcode = getPostShortcode(url);
+
+    const resolvedUrl = await resolveRedirectUrl(rawUrl);
+    const shortcode = getPostShortcode(resolvedUrl);
 
     if (!shortcode) {
         timings.totalTime = performance.now() - totalStartTime;
         return {
             status: 'invalid_url',
-            timings
+            timings,
+        };
+    }
+
+    const cached = postCache.get(shortcode);
+    if (cached && cached.expires > Date.now()) {
+        timings.totalTime = performance.now() - totalStartTime;
+        return {
+            ...cached.result,
+            cached: true,
+            timings,
         };
     }
 
     try {
         const fetchStartTime = performance.now();
-        const headers = await getInstagramHeaders();
+        const headers = await getRotatedInstagramHeaders();
         const userIdMatch = headers['Cookie']?.match(/ds_user_id=([^;\s]+)/);
         const userId = userIdMatch?.[1] || '0';
 
@@ -195,12 +282,12 @@ export async function scrapeInstagram(url: string): Promise<ExtractionResult> {
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'fetch_error',
-                timings
+                timings,
             };
         }
 
         const processStartTime = performance.now();
-        const jsonResponse = (await response.json()) as IG_GraphQLResponseDto;
+        const jsonResponse = await response.json() as any;
         const mediaData = jsonResponse.data?.xdt_shortcode_media;
 
         if (!mediaData) {
@@ -208,7 +295,7 @@ export async function scrapeInstagram(url: string): Promise<ExtractionResult> {
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
-                timings
+                timings,
             };
         }
 
@@ -218,48 +305,80 @@ export async function scrapeInstagram(url: string): Promise<ExtractionResult> {
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
-                timings
+                timings,
             };
         }
 
-        const authorName = mediaData.owner?.full_name || mediaData.owner?.username;
-        const captionText = mediaData.edge_media_to_caption?.edges[0]?.node?.text;
-        const likeCount = mediaData.edge_media_preview_like?.count;
-        const commentCount = mediaData.edge_media_to_parent_comment?.count;
-        const viewCount = mediaData.video_play_count || mediaData.video_view_count;
-        const timestamp = mediaData.taken_at_timestamp;
+        const ownerObj: OwnerInfo = {
+            username: mediaData.owner?.username,
+            fullName: mediaData.owner?.full_name,
+            profilePicUrl: mediaData.owner?.profile_pic_url,
+            isVerified: mediaData.owner?.is_verified,
+            followersCount: mediaData.owner?.edge_followed_by?.count,
+        };
+
+        const captionText = mediaData.edge_media_to_caption?.edges[0]?.node?.text || '';
+        const { hashtags, mentions } = parseHashtagsAndMentions(captionText);
+
+        let musicInfo: MusicInfo | undefined = undefined;
+        const clipsAttr = mediaData.clips_music_attribution_info;
+        if (clipsAttr) {
+            musicInfo = {
+                title: clipsAttr.song_name,
+                artist: clipsAttr.artist_name,
+                audioUrl: clipsAttr.audio_drop_in_url || clipsAttr.progressive_download_url,
+                isOriginal: clipsAttr.uses_original_audio,
+            };
+        }
+
+        let locInfo: LocationInfo | undefined = undefined;
+        if (mediaData.location) {
+            locInfo = {
+                name: mediaData.location.name,
+                slug: mediaData.location.slug,
+            };
+        }
 
         const comments: Comment[] = (mediaData.edge_media_to_parent_comment?.edges || [])
-            .slice(0, 5)
+            .slice(0, 10)
             .map((edge: any) => ({
                 text: edge.node.text,
                 author: edge.node.owner.username,
                 timestamp: edge.node.created_at,
             }))
-            .filter((comment: Comment) => comment.text);
+            .filter((c: Comment) => c.text);
 
         timings.processTime = performance.now() - processStartTime;
         timings.totalTime = performance.now() - totalStartTime;
 
-        return {
+        const result: ExtractionResult = {
             status: 'success',
-            author: authorName,
+            author: ownerObj.fullName || ownerObj.username,
+            owner: ownerObj,
             title: captionText,
             thumbnail: mediaData.display_url,
             media: mediaUrls,
-            likeCount,
-            commentCount,
-            viewCount,
-            timestamp,
+            likeCount: mediaData.edge_media_preview_like?.count,
+            commentCount: mediaData.edge_media_to_parent_comment?.count,
+            viewCount: mediaData.video_play_count || mediaData.video_view_count,
+            timestamp: mediaData.taken_at_timestamp,
+            hashtags,
+            mentions,
+            music: musicInfo,
+            location: locInfo,
             comments,
+            cached: false,
             timings,
         };
+
+        postCache.set(shortcode, { result, expires: Date.now() + CACHE_TTL_MS });
+        return result;
     } catch (error) {
-        console.error('An unexpected error occurred during scraping:', error);
+        console.error('Instagram Scraper Error:', error);
         timings.totalTime = performance.now() - totalStartTime;
         return {
             status: 'fetch_error',
-            timings
+            timings,
         };
     }
 }
