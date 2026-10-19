@@ -2,14 +2,16 @@ import { performance } from 'node:perf_hooks';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const INSTAGRAM_GRAPHQL_URL = 'https://www.instagram.com/api/graphql';
+const INSTAGRAM_API_V1 = 'https://www.instagram.com/api/v1/media';
 const COOKIE_FILE_PATH = join(process.cwd(), 'api', 'insta.txt');
 
-const BASE_INSTAGRAM_HEADERS: Record<string, string> = {
+const BASE_HEADERS: Record<string, string> = {
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Content-Type': 'application/x-www-form-urlencoded',
     'X-IG-App-ID': '936619743392459',
+    'X-ASBD-ID': '359341',
+    'X-IG-WWW-Claim': '0',
+    'Origin': 'https://www.instagram.com',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
@@ -60,8 +62,6 @@ export type ExtractionResult = {
     commentCount?: number;
     viewCount?: number;
     timestamp?: number;
-    hashtags?: string[];
-    mentions?: string[];
     music?: MusicInfo;
     comments?: Comment[];
     cached?: boolean;
@@ -80,7 +80,7 @@ let cookieCacheExpires = 0;
 let cookieRoundRobinIndex = 0;
 
 async function getRotatedInstagramHeaders(): Promise<Record<string, string>> {
-    const headers: Record<string, string> = { ...BASE_INSTAGRAM_HEADERS };
+    const headers: Record<string, string> = { ...BASE_HEADERS };
 
     if (Date.now() > cookieCacheExpires) {
         try {
@@ -111,14 +111,11 @@ async function getRotatedInstagramHeaders(): Promise<Record<string, string>> {
 
 async function resolveRedirectUrl(url: string): Promise<string> {
     if (!url.includes('/share/')) return url;
-
     try {
         const res = await fetch(url, {
             method: 'HEAD',
             redirect: 'follow',
-            headers: {
-                'User-Agent': BASE_INSTAGRAM_HEADERS['User-Agent'],
-            },
+            headers: { 'User-Agent': BASE_HEADERS['User-Agent'] },
         });
         return res.url || url;
     } catch {
@@ -126,69 +123,62 @@ async function resolveRedirectUrl(url: string): Promise<string> {
     }
 }
 
+function shortcodeToMediaId(shortcode: string): string {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    let id = 0n;
+    for (let i = 0; i < shortcode.length; i++) {
+        id = (id * 64n) + BigInt(alphabet.indexOf(shortcode[i]));
+    }
+    return id.toString();
+}
+
 function getPostShortcode(url: string): string | null {
     const match = url.match(SHORTCODE_REGEX);
-    return match ? match[1] : null;
+    if (!match) return null;
+    let shortcode = match[1];
+    if (shortcode.length > 28) {
+        shortcode = shortcode.substring(0, shortcode.length - 28);
+    }
+    return shortcode;
 }
 
-function generateRequestBody(shortcode: string): string {
-    const variables = {
-        shortcode,
-        fetch_comment_count: 40,
-        fetch_related_profile_media_count: 3,
-        parent_comment_count: 24,
-        child_comment_count: 3,
-        fetch_like_count: 10,
-        fetch_tagged_user_count: null,
-        fetch_preview_comment_count: 2,
-        has_threaded_comments: true,
-        hoisted_comment_id: null,
-        hoisted_reply_id: null,
-    };
+function extractMediaFromV1Item(item: any): CleanedMedia[] {
+    const mediaList: CleanedMedia[] = [];
 
-    const params = new URLSearchParams();
-    params.set('doc_id', '10015901848480474');
-    params.set('variables', JSON.stringify(variables));
-
-    return params.toString();
-}
-
-function extractMediaFromResponse(mediaData: any): CleanedMedia[] {
-    if (!mediaData) return [];
-
-    const carouselEdges = mediaData.edge_sidecar_to_children?.edges;
-    if (carouselEdges) {
-        return carouselEdges.flatMap((edge: any) => extractMediaFromResponse(edge.node));
+    if (item.carousel_media) {
+        for (const carouselItem of item.carousel_media) {
+            mediaList.push(...extractMediaFromV1Item(carouselItem));
+        }
+        return mediaList;
     }
 
-    if (mediaData.is_video) {
-        return mediaData.video_url ? [{
+    const isVideo = item.media_type === 2 || !!item.video_versions;
+    
+    let bestImage = item.image_versions2?.candidates?.[0]?.url;
+    let width = item.original_width || item.image_versions2?.candidates?.[0]?.width;
+    let height = item.original_height || item.image_versions2?.candidates?.[0]?.height;
+
+    if (isVideo && item.video_versions?.length > 0) {
+        const bestVideo = item.video_versions[0];
+        mediaList.push({
             type: 'video',
-            url: mediaData.video_url,
-            thumbnail: mediaData.display_url,
-            width: mediaData.dimensions?.width,
-            height: mediaData.dimensions?.height,
-            duration: mediaData.video_duration,
-        }] : [];
+            url: bestVideo.url,
+            thumbnail: bestImage,
+            width: bestVideo.width || width,
+            height: bestVideo.height || height,
+            duration: item.video_duration,
+        });
+    } else if (bestImage) {
+        mediaList.push({
+            type: 'photo',
+            url: bestImage,
+            thumbnail: bestImage,
+            width,
+            height,
+        });
     }
 
-    const highestQualityImageSrc = mediaData.display_resources?.at(-1)?.src;
-    const finalImageUrl = highestQualityImageSrc || mediaData.display_url;
-
-    return finalImageUrl ? [{
-        type: 'photo',
-        url: finalImageUrl,
-        thumbnail: finalImageUrl,
-        width: mediaData.dimensions?.width,
-        height: mediaData.dimensions?.height,
-    }] : [];
-}
-
-function parseHashtagsAndMentions(text: string): { hashtags: string[]; mentions: string[] } {
-    if (!text) return { hashtags: [], mentions: [] };
-    const hashtags = Array.from(text.matchAll(/#([a-zA-Z0-9_]+)/g)).map((m) => m[1]);
-    const mentions = Array.from(text.matchAll(/@([a-zA-Z0-9_.]+)/g)).map((m) => m[1]);
-    return { hashtags, mentions };
+    return mediaList;
 }
 
 export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult> {
@@ -210,13 +200,24 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
     }
 
     try {
+        const mediaId = shortcodeToMediaId(shortcode);
+        const apiUrl = `${INSTAGRAM_API_V1}/${mediaId}/info/`;
+
         const fetchStartTime = performance.now();
         const headers = await getRotatedInstagramHeaders();
 
-        const response = await fetch(INSTAGRAM_GRAPHQL_URL, {
-            method: 'POST',
+        if (!headers['Cookie'] || !headers['Cookie'].includes('sessionid')) {
+            timings.totalTime = performance.now() - totalStartTime;
+            return {
+                status: 'blocked',
+                error_details: 'API requires a valid sessionid cookie in insta.txt',
+                timings
+            };
+        }
+
+        const response = await fetch(apiUrl, {
+            method: 'GET',
             headers,
-            body: generateRequestBody(shortcode),
         });
         timings.fetchTime = performance.now() - fetchStartTime;
 
@@ -230,73 +231,72 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             timings.processTime = performance.now() - processStartTime;
             timings.totalTime = performance.now() - totalStartTime;
             
-            let blockReason = 'Instagram returned a non-JSON response.';
-            if (responseText.includes('Login • Instagram')) {
-                blockReason = 'Login required. Cookie is expired or missing.';
-            } else if (responseText.includes('challenge')) {
-                blockReason = 'Account checkpoint/challenge triggered by Render IP.';
-            }
-
             return {
                 status: 'blocked',
-                error_details: blockReason,
+                error_details: responseText.includes('Login') 
+                    ? 'Login required. The cookie provided in insta.txt is expired or invalid.' 
+                    : 'Instagram blocked the request or returned non-JSON.',
                 timings
             };
         }
 
-        const mediaData = jsonResponse.data?.xdt_shortcode_media;
-
-        if (!mediaData) {
+        if (jsonResponse.status !== 'ok' || !jsonResponse.items || jsonResponse.items.length === 0) {
             timings.processTime = performance.now() - processStartTime;
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
-                error_details: 'The media was not found, or the account is private.',
+                error_details: jsonResponse.message || 'Media not found in API payload.',
                 timings,
             };
         }
 
-        const mediaUrls = extractMediaFromResponse(mediaData);
+        const item = jsonResponse.items[0];
+        const mediaUrls = extractMediaFromV1Item(item);
+
         if (mediaUrls.length === 0) {
             timings.processTime = performance.now() - processStartTime;
             timings.totalTime = performance.now() - totalStartTime;
             return {
                 status: 'not_found',
-                error_details: 'No downloadable media found in the payload.',
+                error_details: 'No downloadable media mapped from payload.',
                 timings,
             };
         }
 
         const ownerObj: OwnerInfo = {
-            username: mediaData.owner?.username,
-            fullName: mediaData.owner?.full_name,
-            profilePicUrl: mediaData.owner?.profile_pic_url,
-            isVerified: mediaData.owner?.is_verified,
-            followersCount: mediaData.owner?.edge_followed_by?.count,
+            username: item.user?.username,
+            fullName: item.user?.full_name,
+            profilePicUrl: item.user?.profile_pic_url,
+            isVerified: item.user?.is_verified,
+            followersCount: item.user?.follower_count,
         };
 
-        const captionText = mediaData.edge_media_to_caption?.edges[0]?.node?.text || '';
-        const { hashtags, mentions } = parseHashtagsAndMentions(captionText);
+        const captionText = item.caption?.text || '';
 
         let musicInfo: MusicInfo | undefined = undefined;
-        const clipsAttr = mediaData.clips_music_attribution_info;
-        if (clipsAttr) {
+        if (item.clips_metadata?.music_info?.music_asset_info) {
+            const asset = item.clips_metadata.music_info.music_asset_info;
             musicInfo = {
-                title: clipsAttr.song_name,
-                artist: clipsAttr.artist_name,
-                audioUrl: clipsAttr.audio_drop_in_url || clipsAttr.progressive_download_url,
-                isOriginal: clipsAttr.uses_original_audio,
+                title: asset.title,
+                artist: asset.display_artist,
+                audioUrl: asset.progressive_download_url,
+                isOriginal: asset.is_original_audio,
+            };
+        } else if (item.clips_metadata?.original_sound_info) {
+            const sound = item.clips_metadata.original_sound_info;
+            musicInfo = {
+                title: sound.original_audio_title,
+                artist: sound.ig_artist?.username,
+                audioUrl: sound.progressive_download_url,
+                isOriginal: true,
             };
         }
 
-        const comments: Comment[] = (mediaData.edge_media_to_parent_comment?.edges || [])
-            .slice(0, 10)
-            .map((edge: any) => ({
-                text: edge.node.text,
-                author: edge.node.owner.username,
-                timestamp: edge.node.created_at,
-            }))
-            .filter((c: Comment) => c.text);
+        const comments: Comment[] = (item.preview_comments || []).map((c: any) => ({
+            text: c.text,
+            author: c.user?.username,
+            timestamp: c.created_at,
+        }));
 
         timings.processTime = performance.now() - processStartTime;
         timings.totalTime = performance.now() - totalStartTime;
@@ -306,14 +306,12 @@ export async function scrapeInstagram(rawUrl: string): Promise<ExtractionResult>
             author: ownerObj.fullName || ownerObj.username,
             owner: ownerObj,
             title: captionText,
-            thumbnail: mediaData.display_url,
+            thumbnail: mediaUrls[0]?.thumbnail,
             media: mediaUrls,
-            likeCount: mediaData.edge_media_preview_like?.count,
-            commentCount: mediaData.edge_media_to_parent_comment?.count,
-            viewCount: mediaData.video_play_count || mediaData.video_view_count,
-            timestamp: mediaData.taken_at_timestamp,
-            hashtags,
-            mentions,
+            likeCount: item.like_count,
+            commentCount: item.comment_count,
+            viewCount: item.play_count || item.view_count,
+            timestamp: item.taken_at,
             music: musicInfo,
             comments,
             cached: false,
