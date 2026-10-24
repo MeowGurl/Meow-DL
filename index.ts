@@ -48,6 +48,7 @@ let activeOperations = 0;
 let activeRequests = 0;
 let restartScheduled = false;
 let shutdownTimer: ReturnType<typeof setTimeout> | null = null;
+let activeJsdomWindow: { close: () => void } | null = null;
 
 const PORT = 3040;
 const DOWNLOAD_DIR = join(process.cwd(), "downloads");
@@ -139,6 +140,7 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
     {
       url: "https://www.youtube.com/",
       referrer: "https://www.youtube.com/",
+      userAgent: USER_AGENT,
     },
   );
 
@@ -151,6 +153,7 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   });
 
   if (!pageResponse.ok) {
+    dom.window.close();
     throw new Error(
       `Could not load YouTube for PO token generation: HTTP ${pageResponse.status}`,
     );
@@ -160,15 +163,23 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   const ytConfig = pageHtml.match(/ytcfg\.set\(({.+?})\);/s)?.[1];
 
   if (!ytConfig) {
+    dom.window.close();
     throw new Error("Could not find ytcfg in page HTML");
   }
+
+  if (activeJsdomWindow) {
+    try {
+      activeJsdomWindow.close();
+    } catch {}
+  }
+  activeJsdomWindow = dom.window;
 
   const domWindow = dom.window as typeof dom.window & {
     yt: { config_: Record<string, unknown> };
   };
 
   domWindow.yt = {
-    config_: JSON.parse(ytConfig) as Record<string, unknown>,
+    config_: parseLooseJSON(ytConfig) as Record<string, unknown>,
   };
 
   Object.assign(globalThis, {
@@ -179,12 +190,11 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
     origin: domWindow.origin,
   });
 
-  if (!("navigator" in globalThis)) {
-    Object.defineProperty(globalThis, "navigator", {
-      value: domWindow.navigator,
-      configurable: true,
-    });
-  }
+  Object.defineProperty(globalThis, "navigator", {
+    value: domWindow.navigator,
+    configurable: true,
+    writable: true,
+  });
 
   const initialAttestationData = pageHtml.match(
     /window\.ytAtN\(\s*({[\s\S]*?})\s*\)/,
@@ -538,64 +548,74 @@ function getAudioFormats(info: YTInfo): ParsedYTFormat[] {
 }
 
 function selectBestAudioFormat(info: YTInfo): ParsedYTFormat {
-  const audioFormats = getAudioFormats(info);
+  const audioFormats = getAudioFormats(info).sort(
+    (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
+  );
 
   if (audioFormats.length === 0) {
     throw new Error("No audio-only stream was found.");
   }
 
+  const defaultMp4a = audioFormats.find(
+    (format) =>
+      format.audio_track?.audio_is_default &&
+      format.mime_type?.includes("mp4a"),
+  );
+  if (defaultMp4a) return defaultMp4a;
+
+  const originalMp4a = audioFormats.find(
+    (format) => format.is_original && format.mime_type?.includes("mp4a"),
+  );
+  if (originalMp4a) return originalMp4a;
+
+  const itag140 = audioFormats.find((format) => format.itag === 140);
+  if (itag140) return itag140;
+
+  const bestMp4a = audioFormats.find((format) =>
+    format.mime_type?.includes("mp4a"),
+  );
+  if (bestMp4a) return bestMp4a;
+
   const defaultAudio = audioFormats.find(
     (format) => format.audio_track?.audio_is_default,
   );
-
-  if (defaultAudio) {
-    return defaultAudio;
-  }
+  if (defaultAudio) return defaultAudio;
 
   const originalAudio = audioFormats.find((format) => format.is_original);
+  if (originalAudio) return originalAudio;
 
-  if (originalAudio) {
-    return originalAudio;
-  }
-
-  const itag140 = audioFormats.find((format) => format.itag === 140);
-
-  if (itag140) {
-    return itag140;
-  }
-
-  const mp4aAudio = audioFormats
-    .filter((format) => format.mime_type?.includes("mp4a"))
-    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
-  return (
-    mp4aAudio ||
-    audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0]
-  );
+  return audioFormats[0];
 }
 
 function selectVideoQualities(info: YTInfo): Map<string, ParsedYTFormat> {
-  const videoFormats = getVideoFormats(info);
+  const videoFormats = getVideoFormats(info).sort(
+    (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
+  );
   const qualities = new Map<string, ParsedYTFormat>();
+
+  const matchesQuality = (format: ParsedYTFormat, quality: string): boolean => {
+    const label = format.quality_label || "";
+    return (
+      label === quality ||
+      new RegExp(`^${quality}(?:\\d+|\\b)`, "i").test(label)
+    );
+  };
 
   for (const quality of ["1080p", "720p"]) {
     const vp9 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("vp9"),
+        matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
     );
-
     const avc1 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("avc1"),
+        matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
     );
-
     const av01 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("av01"),
+        matchesQuality(format, quality) && format.mime_type?.includes("av01"),
     );
 
     const selected = vp9 || avc1 || av01;
-
     if (selected) {
       qualities.set(quality, selected);
     }
@@ -604,21 +624,18 @@ function selectVideoQualities(info: YTInfo): Map<string, ParsedYTFormat> {
   for (const quality of ["480p", "360p", "240p", "144p"]) {
     const avc1 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("avc1"),
+        matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
     );
-
     const vp9 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("vp9"),
+        matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
     );
-
     const av01 = videoFormats.find(
       (format) =>
-        format.quality_label === quality && format.mime_type?.includes("av01"),
+        matchesQuality(format, quality) && format.mime_type?.includes("av01"),
     );
 
     const selected = avc1 || vp9 || av01;
-
     if (selected) {
       qualities.set(quality, selected);
     }
@@ -642,6 +659,11 @@ async function cleanupCachedFile(cacheKey: string): Promise<void> {
 
   if (!cacheEntry) {
     return;
+  }
+
+  if (cacheEntry.expiryTimeoutId) {
+    clearTimeout(cacheEntry.expiryTimeoutId);
+    cacheEntry.expiryTimeoutId = null;
   }
 
   remuxedFileCache.delete(cacheKey);
@@ -693,12 +715,20 @@ async function parallelDownloadManager(
     (sum, task) => sum + (task.end - task.start + 1),
     0,
   );
+
+  const decipheredUrl = addPoToken(
+    await tasks[0].format.decipher(player),
+    poToken,
+  );
+
   const workerCount = Math.min(tasks.length, MAX_CONCURRENT_DOWNLOADS);
   const downloadedChunks = new Map<number, Buffer>();
   const writer = Bun.file(destinationFile).writer();
   const queue = [...tasks];
+  const abortController = new AbortController();
   let nextChunkToWrite = 0;
   let writerClosed = false;
+  let aborted = false;
 
   const closeWriter = async () => {
     if (!writerClosed) {
@@ -708,6 +738,10 @@ async function parallelDownloadManager(
   };
 
   const writeAvailableChunks = () => {
+    if (writerClosed || aborted) {
+      return;
+    }
+
     while (downloadedChunks.has(nextChunkToWrite)) {
       const chunk = downloadedChunks.get(nextChunkToWrite);
 
@@ -728,15 +762,14 @@ async function parallelDownloadManager(
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= task.retries; attempt++) {
+      if (aborted) return;
+
       try {
-        const decipheredUrl = addPoToken(
-          await task.format.decipher(player),
-          poToken,
-        );
         const response = await fetch(decipheredUrl, {
           headers: {
             Range: `bytes=${task.start}-${task.end}`,
           },
+          signal: abortController.signal,
         });
 
         if (!(response.ok || response.status === 206)) {
@@ -752,10 +785,13 @@ async function parallelDownloadManager(
           );
         }
 
-        downloadedChunks.set(task.index, buffer);
-        writeAvailableChunks();
+        if (!aborted && !writerClosed) {
+          downloadedChunks.set(task.index, buffer);
+          writeAvailableChunks();
+        }
         return;
       } catch (error) {
+        if (aborted) return;
         lastError = error;
 
         if (attempt < task.retries) {
@@ -765,6 +801,9 @@ async function parallelDownloadManager(
         }
       }
     }
+
+    aborted = true;
+    abortController.abort();
 
     throw new Error(
       `[${sessionId}] ${mediaType} worker ${workerId} failed ${task.description}: ${
@@ -777,7 +816,7 @@ async function parallelDownloadManager(
     await Promise.all(
       Array.from({ length: workerCount }, (_, workerIndex) =>
         (async () => {
-          while (queue.length > 0) {
+          while (!aborted && queue.length > 0) {
             const task = queue.shift();
 
             if (task) {
@@ -801,7 +840,11 @@ async function parallelDownloadManager(
 
     return destinationFile;
   } catch (error) {
+    aborted = true;
+    abortController.abort();
+    downloadedChunks.clear();
     await closeWriter();
+    await rm(destinationFile, { force: true }).catch(() => {});
     throw error;
   }
 }
@@ -904,10 +947,22 @@ async function getOrFetchVideoData(
 
   const infoFetchStart = performance.now();
   const contentPoToken = await mintContentPoToken(videoId);
-  const info = await innertube.getBasicInfo(videoId, {
+  
+  let info = await innertube.getBasicInfo(videoId, {
     client: "YTMUSIC",
     po_token: contentPoToken,
   });
+
+  if (
+    info.playability_status?.status !== "OK" ||
+    !info.streaming_data?.adaptive_formats?.length
+  ) {
+    info = await innertube.getBasicInfo(videoId, {
+      client: "WEB",
+      po_token: contentPoToken,
+    });
+  }
+
   const fetchDuration = performance.now() - infoFetchStart;
   const player = innertube.session.player;
 
@@ -1108,7 +1163,13 @@ async function getOrStartDownload(
       await mkdir(tempDir, { recursive: true });
 
       const finalFilename = session.filename;
-      const finalFilePath = join(DOWNLOAD_DIR, finalFilename);
+      const diskExtension = finalFilename.endsWith(".webm")
+        ? "webm"
+        : finalFilename.endsWith(".m4a")
+          ? "m4a"
+          : "mp4";
+      const finalFilePath = join(DOWNLOAD_DIR, `${cacheKey}.${diskExtension}`);
+      
       const audioFormat = session.bestAudioFormat;
       const audioExtension = getFormatExtension(
         audioFormat,
@@ -1454,15 +1515,13 @@ const app = new Elysia()
   .onBeforeHandle(({ request, set }) => {
     const ip = getIp(request);
 
-    if (!checkRateLimit(ip)) {
+    if (!checkRateLimit(ip) || isSpam(request)) {
       set.status = 429;
       return {
         status: "error",
-        message: "Rate limit exceeded",
+        message: "Rate limit exceeded or spam detected",
       };
     }
-
-    isSpam(request);
 
     activeRequests++;
 
@@ -1484,6 +1543,13 @@ const app = new Elysia()
       !(response instanceof Response)
     ) {
       set.headers["Content-Type"] = "application/json; charset=utf-8";
+    }
+  })
+  .onError(() => {
+    activeRequests = Math.max(0, activeRequests - 1);
+
+    if (restartScheduled && activeRequests === 0 && activeOperations === 0) {
+      scheduleIdleRestart();
     }
   })
   .onStart(async () => {
@@ -2016,11 +2082,11 @@ const app = new Elysia()
           throw new Error("Generated download file no longer exists.");
         }
 
-        set.headers["Content-Disposition"] = createContentDisposition(
-          cachedFile.filename,
-        );
-        set.headers["Content-Type"] = isAudioOnly ? "audio/mp4" : "video/mp4";
-        set.headers["Content-Length"] = file.size.toString();
+        const mimeType = isAudioOnly
+          ? cachedFile.filename.endsWith(".webm")
+            ? "audio/webm"
+            : "audio/mp4"
+          : "video/mp4";
 
         console.log(
           `[${cacheKey}] Download prepared in ${(
@@ -2028,7 +2094,13 @@ const app = new Elysia()
           ).toFixed(2)}ms.`,
         );
 
-        return new Response(file.stream());
+        return new Response(file, {
+          headers: {
+            "Content-Disposition": createContentDisposition(cachedFile.filename),
+            "Content-Type": mimeType,
+            "Content-Length": file.size.toString(),
+          },
+        });
       } catch (error) {
         activeDownloads.delete(cacheKey);
         set.status = 500;
