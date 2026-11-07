@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import ffmpeg from "ffmpeg-static";
 
-import geminiHandler from "./api/gemini";
+import geminiHandler, { AVAILABLE_MODELS } from "./api/gemini";
 import instaHandler from "./api/insta";
 import instav2Handler from "./api/instav2";
 import fbHandler from "./api/fb";
@@ -1857,35 +1857,29 @@ const app = new Elysia()
   .get(
     "/g",
     async ({ query, set }) => {
-      const result = await geminiHandler(query.prompt);
-      if (result.status !== "success") {
-        set.status =
-          result.status === "auth_error"
-            ? 401
-            : result.status === "invalid_prompt"
-              ? 400
-              : 502;
+      const prompt = (query.prompt || "").trim();
+      const model = query.model || "gemini-auto";
+      const result = await geminiHandler(prompt, model);
+      if (result.status === "fetch_error") {
+        set.status = 502;
       }
       return result;
     },
     {
       query: t.Object({
-        prompt: t.String(),
+        prompt: t.Optional(t.String()),
+        model: t.Optional(t.String()),
       }),
     },
   )
   .post(
     "/g",
     async ({ body, set }: any) => {
-      const prompt = body?.prompt || "";
-      const result = await geminiHandler(prompt);
-      if (result.status !== "success") {
-        set.status =
-          result.status === "auth_error"
-            ? 401
-            : result.status === "invalid_prompt"
-              ? 400
-              : 502;
+      const prompt = (body?.prompt || "").trim();
+      const model = body?.model || "gemini-auto";
+      const result = await geminiHandler(prompt, model);
+      if (result.status === "fetch_error") {
+        set.status = 502;
       }
       return result;
     },
@@ -1893,6 +1887,7 @@ const app = new Elysia()
       body: t.Optional(
         t.Object({
           prompt: t.Optional(t.String()),
+          model: t.Optional(t.String()),
         }),
       ),
     },
