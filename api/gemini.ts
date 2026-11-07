@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type GeminiResult = {
-  status: "success" | "fetch_error" | "auth_error" | "invalid_prompt";
+  status: "success" | "fetch_error" | "invalid_prompt";
   prompt: string;
   response?: string;
   error?: string;
@@ -23,7 +23,7 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 let cachedAtToken: string | null = null;
-let cachedBuildLabel = "boq_assistant-bard-web-server_20261103.00_p0";
+let cachedBuildLabel: string | null = null;
 let tokenExpiresAt = 0;
 
 function parseCookieContent(raw: string): string {
@@ -72,38 +72,61 @@ async function getGeminiCookies(): Promise<string | null> {
   return null;
 }
 
-async function getSessionTokens(cookie: string): Promise<{
+async function tryExtractSessionTokens(cookie: string): Promise<{
   at: string | null;
-  bl: string;
+  bl: string | null;
 }> {
   if (cachedAtToken && Date.now() < tokenExpiresAt) {
     return { at: cachedAtToken, bl: cachedBuildLabel };
   }
 
-  const response = await fetch("https://gemini.google.com/app", {
-    headers: {
-      "User-Agent": USER_AGENT,
-      Cookie: cookie,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
+  const candidateUrls = [
+    "https://gemini.google.com/app",
+    "https://gemini.google.com/u/0/app",
+    "https://gemini.google.com/u/1/app",
+  ];
 
-  if (!response.ok) {
-    throw new Error(`Failed to initialize Gemini session: HTTP ${response.status}`);
-  }
+  for (const url of candidateUrls) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          Cookie: cookie,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin",
+        },
+      });
 
-  const html = await response.text();
-  const atMatch = html.match(/"SNlM0e":"([^"]+)"/);
-  const blMatch = html.match(/"cfb2h":"([^"]+)"/) || html.match(/"bl":"([^"]+)"/);
+      if (!response.ok) continue;
 
-  if (atMatch?.[1]) {
-    cachedAtToken = atMatch[1];
-    tokenExpiresAt = Date.now() + 30 * 60 * 1000;
-  }
+      const html = await response.text();
+      const atMatch =
+        html.match(/"SNlM0e":"([^"]+)"/) ||
+        html.match(/\["SNlM0e",\s*(?:\[\],)?\s*\["([^"]+)"\]/) ||
+        html.match(/["']SNlM0e["'],\s*(?:\[\],)?\s*["']([^"']+)["']/);
 
-  if (blMatch?.[1]) {
-    cachedBuildLabel = blMatch[1];
+      const blMatch =
+        html.match(/"cfb2h":"([^"]+)"/) ||
+        html.match(/"bl":"([^"]+)"/) ||
+        html.match(/boq_assistant-bard-web-server_[0-9a-zA-Z._-]+/);
+
+      if (atMatch?.[1]) {
+        cachedAtToken = atMatch[1];
+        tokenExpiresAt = Date.now() + 30 * 60 * 1000;
+      }
+      if (blMatch) {
+        cachedBuildLabel =
+          typeof blMatch === "string"
+            ? blMatch
+            : blMatch[1] || blMatch[0];
+      }
+
+      if (cachedAtToken) break;
+    } catch {}
   }
 
   return { at: cachedAtToken, bl: cachedBuildLabel };
@@ -114,21 +137,35 @@ function parseGeminiStream(responseText: string): string {
   let accumulatedText = "";
 
   for (const line of lines) {
-    if (!line.startsWith('[["wrb.fr"')) continue;
+    if (!line.includes("wrb.fr")) continue;
+    const jsonStart = line.indexOf("[");
+    if (jsonStart === -1) continue;
+
     try {
-      const parsed = JSON.parse(line);
-      const dataStr = parsed[0][2];
-      if (typeof dataStr === "string") {
-        const inner = JSON.parse(dataStr);
-        const candidates = inner[4];
+      const parsed = JSON.parse(line.slice(jsonStart));
+      const payloadString = Array.isArray(parsed) ? parsed[0]?.[2] : null;
+      if (typeof payloadString === "string") {
+        const payload = JSON.parse(payloadString);
+        const candidates = payload?.[4];
         if (Array.isArray(candidates) && candidates.length > 0) {
-          const textPart = candidates[0][1]?.[0];
-          if (typeof textPart === "string") {
-            accumulatedText = textPart;
+          const textCandidate = candidates[0]?.[1]?.[0];
+          if (typeof textCandidate === "string" && textCandidate.trim()) {
+            accumulatedText = textCandidate;
           }
         }
       }
     } catch {}
+  }
+
+  if (!accumulatedText) {
+    const rawMatches = responseText.match(/"rc_[^"]+","([^"]+)"/);
+    if (rawMatches?.[1]) {
+      try {
+        accumulatedText = JSON.parse(`"${rawMatches[1]}"`);
+      } catch {
+        accumulatedText = rawMatches[1];
+      }
+    }
   }
 
   return accumulatedText;
@@ -140,78 +177,86 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
 
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     timings.totalTime = performance.now() - totalStartTime;
-    return { status: "invalid_prompt", prompt: "", error: "Missing prompt parameter.", timings };
+    return {
+      status: "invalid_prompt",
+      prompt: "",
+      error: "Missing prompt parameter.",
+      timings,
+    };
   }
 
   const trimmedPrompt = prompt.trim();
   const cookie = await getGeminiCookies();
 
-  if (!cookie) {
-    timings.totalTime = performance.now() - totalStartTime;
-    return {
-      status: "auth_error",
-      prompt: trimmedPrompt,
-      error: "No cookies found in api/gemini.txt or cookies.txt. Please supply Google session cookies.",
-      timings,
-    };
+  const { at, bl } = cookie
+    ? await tryExtractSessionTokens(cookie)
+    : { at: null, bl: null };
+
+  const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
+  const messageStruct = [
+    [trimmedPrompt, 0, null, null, null, null, 0],
+    ["en"],
+    ["", "", "", null, null, []],
+    null,
+    null,
+    null,
+    [1],
+    0,
+    [],
+    [],
+    1,
+    0,
+  ];
+  const fReq = JSON.stringify([null, JSON.stringify(messageStruct)]);
+
+  const queryParams = new URLSearchParams({
+    _reqid: reqId,
+    rt: "c",
+  });
+  if (bl) {
+    queryParams.set("bl", bl);
   }
 
+  const bodyParams = new URLSearchParams();
+  bodyParams.set("f.req", fReq);
+  if (at) {
+    bodyParams.set("at", at);
+  }
+
+  const rpcUrl = `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${queryParams.toString()}`;
+
+  const requestHeaders: Record<string, string> = {
+    "User-Agent": USER_AGENT,
+    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    Origin: "https://gemini.google.com",
+    Referer: "https://gemini.google.com/",
+    "X-Same-Domain": "1",
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+
+  if (cookie) {
+    requestHeaders["Cookie"] = cookie;
+  }
+
+  const fetchStartTime = performance.now();
+
   try {
-    const { at, bl } = await getSessionTokens(cookie);
-
-    if (!at) {
-      timings.totalTime = performance.now() - totalStartTime;
-      return {
-        status: "auth_error",
-        prompt: trimmedPrompt,
-        error: "Failed to extract Gemini XSRF token (SNlM0e). Your cookies may be expired.",
-        timings,
-      };
-    }
-
-    const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
-    const messageStruct = [
-      [trimmedPrompt, 0, null, null, null, null, 0],
-      ["en"],
-      ["", "", "", null, null, []],
-      null,
-      null,
-      null,
-      [1],
-      0,
-      [],
-      [],
-      1,
-      0,
-    ];
-    const fReq = JSON.stringify([null, JSON.stringify(messageStruct)]);
-
-    const params = new URLSearchParams({
-      bl,
-      _reqid: reqId,
-      rt: "c",
-    });
-
-    const body = new URLSearchParams({
-      "f.req": fReq,
-      at,
-    });
-
-    const fetchStartTime = performance.now();
-    const rpcUrl = `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${params.toString()}`;
-
-    const response = await fetch(rpcUrl, {
+    let response = await fetch(rpcUrl, {
       method: "POST",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Cookie: cookie,
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        Origin: "https://gemini.google.com",
-        Referer: "https://gemini.google.com/",
-        "X-Same-Domain": "1",
-      },
-      body: body.toString(),
+      headers: requestHeaders,
+      body: bodyParams.toString(),
     });
+
+    if (!response.ok && cookie) {
+      delete requestHeaders["Cookie"];
+      bodyParams.delete("at");
+      response = await fetch(rpcUrl, {
+        method: "POST",
+        headers: requestHeaders,
+        body: bodyParams.toString(),
+      });
+    }
 
     timings.fetchTime = performance.now() - fetchStartTime;
 
@@ -220,21 +265,21 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
       return {
         status: "fetch_error",
         prompt: trimmedPrompt,
-        error: `Gemini RPC returned HTTP ${response.status}`,
+        error: `Gemini Web RPC returned HTTP ${response.status}`,
         timings,
       };
     }
 
-    const rawText = await response.text();
-    const generatedText = parseGeminiStream(rawText);
+    const rawResponse = await response.text();
+    const textOutput = parseGeminiStream(rawResponse);
 
     timings.totalTime = performance.now() - totalStartTime;
 
-    if (!generatedText) {
+    if (!textOutput) {
       return {
         status: "fetch_error",
         prompt: trimmedPrompt,
-        error: "Empty or unrecognized response payload from Gemini Web.",
+        error: "Empty or unparseable response from Gemini Web.",
         timings,
       };
     }
@@ -242,7 +287,7 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
     return {
       status: "success",
       prompt: trimmedPrompt,
-      response: generatedText,
+      response: textOutput,
       timings,
     };
   } catch (error) {
@@ -250,7 +295,10 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
     return {
       status: "fetch_error",
       prompt: trimmedPrompt,
-      error: error instanceof Error ? error.message : "Unknown error occurred while contacting Gemini.",
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unknown network error during Gemini query.",
       timings,
     };
   }
