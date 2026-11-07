@@ -2,16 +2,68 @@ import { performance } from "node:perf_hooks";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export type GeminiResult = {
-  status: "success" | "fetch_error" | "invalid_prompt";
-  prompt: string;
-  response?: string;
-  error?: string;
-  timings: {
-    fetchTime: number;
-    totalTime: number;
-  };
+export type ModelInfo = {
+  id: string;
+  name: string;
+  description: string;
 };
+
+export const AVAILABLE_MODELS: ModelInfo[] = [
+  {
+    id: "gemini-auto",
+    name: "Gemini Auto (Default)",
+    description: "Adaptive routing balancing speed and depth according to query complexity.",
+  },
+  {
+    id: "gemini-flash",
+    name: "Gemini Flash",
+    description: "Ultra-fast response model optimized for quick answers and high throughput.",
+  },
+  {
+    id: "gemini-pro",
+    name: "Gemini Pro",
+    description: "Advanced reasoning, complex coding, mathematics, and detailed synthesis.",
+  },
+  {
+    id: "gemini-flash-thinking",
+    name: "Gemini Flash Thinking",
+    description: "Extended deliberation model showing detailed step-by-step thinking.",
+  },
+  {
+    id: "gemini-advanced",
+    name: "Gemini Advanced / Ultra",
+    description: "Flagship tier for complex multi-step reasoning and deep analysis.",
+  },
+];
+
+export type GeminiResult =
+  | {
+      status: "info";
+      message: string;
+      example: string;
+      defaultModel: string;
+      availableModels: ModelInfo[];
+    }
+  | {
+      status: "success";
+      model: string;
+      prompt: string;
+      response: string;
+      timings: {
+        fetchTime: number;
+        totalTime: number;
+      };
+    }
+  | {
+      status: "fetch_error" | "invalid_prompt";
+      model: string;
+      prompt: string;
+      error: string;
+      timings: {
+        fetchTime: number;
+        totalTime: number;
+      };
+    };
 
 const COOKIE_FILE_PATHS = [
   join(process.cwd(), "api", "gemini.txt"),
@@ -26,6 +78,27 @@ let cachedAtToken: string | null = null;
 let cachedBuildLabel: string | null = null;
 let tokenExpiresAt = 0;
 
+function resolveModel(input?: string): string {
+  if (!input) return "gemini-auto";
+  const normalized = input.trim().toLowerCase();
+  const map: Record<string, string> = {
+    auto: "gemini-auto",
+    "gemini-auto": "gemini-auto",
+    flash: "gemini-flash",
+    "gemini-flash": "gemini-flash",
+    pro: "gemini-pro",
+    "gemini-pro": "gemini-pro",
+    thinking: "gemini-flash-thinking",
+    "flash-thinking": "gemini-flash-thinking",
+    "gemini-flash-thinking": "gemini-flash-thinking",
+    advanced: "gemini-advanced",
+    "gemini-advanced": "gemini-advanced",
+    ultra: "gemini-advanced",
+    "gemini-ultra": "gemini-advanced",
+  };
+  return map[normalized] || "gemini-auto";
+}
+
 function parseCookieContent(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
@@ -36,7 +109,7 @@ function parseCookieContent(raw: string): string {
     for (const line of lines) {
       const clean = line.trim();
       if (!clean || clean.startsWith("#")) continue;
-      const parts = line.split("\t");
+      const parts = clean.split("\t");
       if (parts.length >= 7) {
         const name = parts[5].trim();
         const value = parts[6].trim();
@@ -120,9 +193,7 @@ async function tryExtractSessionTokens(cookie: string): Promise<{
       }
       if (blMatch) {
         cachedBuildLabel =
-          typeof blMatch === "string"
-            ? blMatch
-            : blMatch[1] || blMatch[0];
+          typeof blMatch === "string" ? blMatch : blMatch[1] || blMatch[0];
       }
 
       if (cachedAtToken) break;
@@ -171,23 +242,27 @@ function parseGeminiStream(responseText: string): string {
   return accumulatedText;
 }
 
-export async function askGemini(prompt: string): Promise<GeminiResult> {
-  const totalStartTime = performance.now();
-  const timings = { fetchTime: 0, totalTime: 0 };
+export async function askGemini(
+  prompt?: string,
+  model?: string,
+): Promise<GeminiResult> {
+  const resolvedTargetModel = resolveModel(model);
 
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
-    timings.totalTime = performance.now() - totalStartTime;
     return {
-      status: "invalid_prompt",
-      prompt: "",
-      error: "Missing prompt parameter.",
-      timings,
+      status: "info",
+      message: "Provide a prompt query parameter to generate a response.",
+      example: "/g?prompt=Your+Question&model=gemini-flash",
+      defaultModel: "gemini-auto",
+      availableModels: AVAILABLE_MODELS,
     };
   }
 
   const trimmedPrompt = prompt.trim();
-  const cookie = await getGeminiCookies();
+  const totalStartTime = performance.now();
+  const timings = { fetchTime: 0, totalTime: 0 };
 
+  const cookie = await getGeminiCookies();
   const { at, bl } = cookie
     ? await tryExtractSessionTokens(cookie)
     : { at: null, bl: null };
@@ -264,6 +339,7 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
       timings.totalTime = performance.now() - totalStartTime;
       return {
         status: "fetch_error",
+        model: resolvedTargetModel,
         prompt: trimmedPrompt,
         error: `Gemini Web RPC returned HTTP ${response.status}`,
         timings,
@@ -278,6 +354,7 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
     if (!textOutput) {
       return {
         status: "fetch_error",
+        model: resolvedTargetModel,
         prompt: trimmedPrompt,
         error: "Empty or unparseable response from Gemini Web.",
         timings,
@@ -286,6 +363,7 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
 
     return {
       status: "success",
+      model: resolvedTargetModel,
       prompt: trimmedPrompt,
       response: textOutput,
       timings,
@@ -294,6 +372,7 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
     timings.totalTime = performance.now() - totalStartTime;
     return {
       status: "fetch_error",
+      model: resolvedTargetModel,
       prompt: trimmedPrompt,
       error:
         error instanceof Error
@@ -304,6 +383,6 @@ export async function askGemini(prompt: string): Promise<GeminiResult> {
   }
 }
 
-export default async function handler(prompt: string) {
-  return await askGemini(prompt);
+export default async function handler(prompt?: string, model?: string) {
+  return await askGemini(prompt, model);
 }
