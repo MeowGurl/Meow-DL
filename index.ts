@@ -1854,6 +1854,49 @@ const app = new Elysia()
       }),
     },
   )
+  .get(
+    "/g",
+    async ({ query, set }) => {
+      const result = await geminiHandler(query.prompt);
+      if (result.status !== "success") {
+        set.status =
+          result.status === "auth_error"
+            ? 401
+            : result.status === "invalid_prompt"
+              ? 400
+              : 502;
+      }
+      return result;
+    },
+    {
+      query: t.Object({
+        prompt: t.String(),
+      }),
+    },
+  )
+  .post(
+    "/g",
+    async ({ body, set }: any) => {
+      const prompt = body?.prompt || "";
+      const result = await geminiHandler(prompt);
+      if (result.status !== "success") {
+        set.status =
+          result.status === "auth_error"
+            ? 401
+            : result.status === "invalid_prompt"
+              ? 400
+              : 502;
+      }
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object({
+          prompt: t.Optional(t.String()),
+        }),
+      ),
+    },
+  )
   .get("/pin/stats", () => getCacheStats())
   .post("/pin/cache/clear", () => {
     clearCaches();
