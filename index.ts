@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import ffmpeg from "ffmpeg-static";
 
+import geminiHandler from "./api/gemini";
 import instaHandler from "./api/insta";
 import instav2Handler from "./api/instav2";
 import fbHandler from "./api/fb";
