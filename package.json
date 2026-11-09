@@ -20,7 +20,7 @@
     "cheerio": "latest",
     "clsx": "^2.1.1",
     "concurrently": "^9.2.1",
-    "elysia": "latest",
+    "elysia": "1.4.31",
     "entities": "latest",
     "ffmpeg-static": "latest",
     "json-custom-numbers": "latest",
