@@ -16,7 +16,7 @@
     "autoprefixer": "^10.4.22",
     "axios": "latest",
     "bgutils-js": "latest",
-    "@napi-rs/canvas": "latest",
+    "canvas": "latest",
     "cheerio": "latest",
     "clsx": "^2.1.1",
     "concurrently": "^9.2.1",
@@ -27,7 +27,7 @@
     "jsdom": "latest",
     "lucide-react": "^0.560.0",
     "memoirist": "latest",
-    "moment-timezone": "0.6.0",
+    "moment-timezone": "latest",
     "node-fetch": "latest",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
@@ -35,7 +35,7 @@
   },
   "devDependencies": {
     "bun-types": "latest",
-    "typescript": "^5.4.5",
+    "typescript": "latest",
     "@types/node-fetch": "latest"
   },
   "keywords": [
