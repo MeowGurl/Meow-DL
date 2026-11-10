@@ -26,7 +26,6 @@ import { mkdir, rm } from "node:fs/promises";
 import ffmpeg from "ffmpeg-static";
 
 import geminiHandler, { AVAILABLE_MODELS } from "./api/gemini";
-import instaHandler from "./api/insta";
 import instav2Handler from "./api/instav2";
 import fbHandler from "./api/fb";
 import pinHandler, {
@@ -1901,17 +1900,6 @@ const app = new Elysia()
       message: "Pinterest cache cleared",
     };
   })
-  .get(
-    "/insta",
-    async ({ query }) => {
-      return instaHandler(query.url);
-    },
-    {
-      query: t.Object({
-        url: t.String(),
-      }),
-    },
-  )
   .get(
     "/instav2",
     async ({ query }) => {
