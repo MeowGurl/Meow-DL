@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { decode } from "entities";
 
 export type CleanedMedia = {
-  type: "video" | "photo";
+  type: "video" | "photo" | "gif";
   url: string;
 };
 
@@ -282,7 +282,20 @@ async function getPinterestCookies(): Promise<string | null> {
 
 function cleanUrl(raw?: string | null): string | undefined {
   if (!raw) return undefined;
-  return decode(raw.replace(/\\\//g, "/").replace(/\\u0026/g, "&").trim());
+  try {
+    return decode(raw.replace(/\\\//g, "/").replace(/\\u0026/g, "&").trim());
+  } catch {
+    return raw
+      .replace(/\\\//g, "/")
+      .replace(/\\u0026/g, "&")
+      .replace(/&amp;/g, "&")
+      .trim();
+  }
+}
+
+function extractPinId(url: string): string | null {
+  const match = url.match(/\/pin\/(\d+)/i) || url.match(/^(\d+)$/);
+  return match ? match[1] : null;
 }
 
 async function resolveRedirectUrl(url: string): Promise<string> {
@@ -302,6 +315,97 @@ async function resolveRedirectUrl(url: string): Promise<string> {
   }
 }
 
+async function fetchPinResource(
+  pinId: string,
+  cookie: string | null,
+): Promise<{
+  media: CleanedMedia[];
+  title?: string;
+  author?: string;
+  description?: string;
+  thumbnail?: string;
+} | null> {
+  try {
+    const dataParam = encodeURIComponent(
+      JSON.stringify({
+        options: {
+          id: pinId,
+          field_set_key: "detailed",
+        },
+        context: {},
+      }),
+    );
+    const searchUrl = `https://www.pinterest.com/resource/PinResource/get/?data=${dataParam}`;
+    const headers = {
+      ...API_HEADERS,
+      ...(cookie ? { Cookie: cookie } : {}),
+    };
+
+    const res = await fetch(searchUrl, { headers });
+    if (!res.ok) return null;
+
+    const json: any = await res.json();
+    const pin = json?.resource_response?.data;
+    if (!pin) return null;
+
+    let videoUrl: string | undefined = undefined;
+    if (pin.videos?.video_list) {
+      const list = pin.videos.video_list;
+      const formats = Object.values(list)
+        .filter(
+          (v: any) => v && typeof v === "object" && typeof v.url === "string",
+        )
+        .sort((a: any, b: any) => {
+          const aMp4 = a.url.includes(".mp4") ? 1 : 0;
+          const bMp4 = b.url.includes(".mp4") ? 1 : 0;
+          if (aMp4 !== bMp4) return bMp4 - aMp4;
+          return (
+            (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0)
+          );
+        });
+      if (formats.length > 0) {
+        videoUrl = (formats[0] as any).url;
+      }
+    }
+
+    let imageUrl: string | undefined =
+      pin.images?.orig?.url ||
+      pin.images?.["736x"]?.url ||
+      pin.images?.["474x"]?.url;
+
+    const isGif =
+      pin.is_gif === true ||
+      pin.is_animated === true ||
+      Boolean(imageUrl && imageUrl.toLowerCase().includes(".gif"));
+
+    const isVideo = pin.is_video === true || Boolean(videoUrl);
+
+    const media: CleanedMedia[] = [];
+    if (videoUrl || isVideo) {
+      if (videoUrl) {
+        media.push({ type: "video", url: cleanUrl(videoUrl)! });
+      }
+    } else if (isGif && imageUrl) {
+      const gifUrl = imageUrl.replace(/\.(?:jpg|jpeg|png|webp)$/i, ".gif");
+      media.push({ type: "gif", url: cleanUrl(gifUrl)! });
+    } else if (imageUrl) {
+      media.push({ type: "photo", url: cleanUrl(imageUrl)! });
+    }
+
+    if (media.length === 0) return null;
+
+    return {
+      media,
+      title: pin.title || pin.grid_title || undefined,
+      author: pin.pinner?.username || pin.pinner?.full_name || undefined,
+      description: pin.description || pin.seo_description || undefined,
+      thumbnail: cleanUrl(imageUrl),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function extractFromHtml(html: string): {
   media: CleanedMedia[];
   title?: string;
@@ -309,46 +413,65 @@ function extractFromHtml(html: string): {
   description?: string;
   thumbnail?: string;
 } {
+  const unescaped = html.replace(/\\\//g, "/").replace(/\\u0026/g, "&");
+
   let videoUrl: string | undefined = undefined;
   let imageUrl: string | undefined = undefined;
+  let isGif = false;
   let title: string | undefined = undefined;
   let author: string | undefined = undefined;
   let description: string | undefined = undefined;
   let thumbnail: string | undefined = undefined;
 
-  const ldMatches =
-    html.match(
-      /<script\s+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
-    ) || [];
-
-  for (const block of ldMatches) {
+  const scriptMatches =
+    html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  for (const block of scriptMatches) {
+    const inner = block.replace(/<\/?script[^>]*>/gi, "").trim();
+    if (!inner.startsWith("{") && !inner.startsWith("[")) continue;
     try {
-      const content = block.replace(/<\/?script[^>]*>/gi, "").trim();
-      const data = JSON.parse(content);
-      const items = Array.isArray(data) ? data : [data];
-      for (const item of items) {
-        if (
-          item["@type"] &&
-          (item["@type"].includes("VideoObject") ||
-            item["@type"].includes("Pin") ||
-            item["@type"].includes("ImageObject"))
-        ) {
-          title = title || item.name || item.headline || item.title;
-          description = description || item.description;
-          author =
-            author ||
-            item.author?.name ||
-            item.creator?.name ||
-            item.publisher?.name;
-          thumbnail = thumbnail || item.thumbnailUrl || item.thumbnail;
-          if (
-            item.contentUrl &&
-            (item.contentUrl.includes(".mp4") ||
-              item["@type"].includes("VideoObject"))
-          ) {
-            videoUrl = item.contentUrl;
+      const data = JSON.parse(inner);
+      const queue = [data];
+      while (queue.length > 0) {
+        const curr = queue.shift();
+        if (!curr || typeof curr !== "object") continue;
+
+        if (curr.is_gif === true || curr.is_animated === true) {
+          isGif = true;
+        }
+
+        if (curr.video_list && typeof curr.video_list === "object") {
+          const formats = Object.values(curr.video_list)
+            .filter(
+              (v: any) =>
+                v && typeof v === "object" && typeof v.url === "string",
+            )
+            .sort((a: any, b: any) => {
+              const aMp4 = a.url.includes(".mp4") ? 1 : 0;
+              const bMp4 = b.url.includes(".mp4") ? 1 : 0;
+              if (aMp4 !== bMp4) return bMp4 - aMp4;
+              return (
+                (b.width || 0) * (b.height || 0) -
+                (a.width || 0) * (a.height || 0)
+              );
+            });
+          if (formats.length > 0 && !videoUrl) {
+            videoUrl = (formats[0] as any).url;
           }
-          imageUrl = imageUrl || item.contentUrl || item.image;
+        }
+
+        if (
+          curr.orig &&
+          typeof curr.orig === "object" &&
+          curr.orig.url &&
+          !imageUrl
+        ) {
+          imageUrl = curr.orig.url;
+        }
+
+        for (const val of Object.values(curr)) {
+          if (val && typeof val === "object") {
+            queue.push(val);
+          }
         }
       }
     } catch {}
@@ -356,27 +479,43 @@ function extractFromHtml(html: string): {
 
   if (!videoUrl) {
     const vMatch =
-      html.match(
-        /https?:\/\/[^"'\s\\]+\/(?:720p|exp7|480p|mc\/720p)\/[^"'\s\\]+\.mp4/i,
+      unescaped.match(
+        /https?:\/\/(?:v\d*|v-cf)\.pinimg\.com\/videos\/[^\s"'\\]+\.(?:mp4|m3u8)/i,
       ) ||
-      html.match(
-        /https?:\/\/v\.pinimg\.com\/videos\/(?:mc\/)?[^"'\s\\]+\.mp4/i,
-      );
+      unescaped.match(
+        /https?:\/\/[^\s"'\\]+\/(?:720p|exp7|480p|mc\/720p|iht\/720p)\/[^\s"'\\]+\.mp4/i,
+      ) ||
+      unescaped.match(/https?:\/\/[^\s"'\\]+\.mp4/i);
     if (vMatch) {
-      videoUrl = cleanUrl(vMatch[0]);
+      videoUrl = vMatch[0];
     }
+  }
+
+  if (!isGif) {
+    isGif =
+      /"is_gif"\s*:\s*true/i.test(unescaped) ||
+      /"is_animated"\s*:\s*true/i.test(unescaped) ||
+      /data-is-gif="true"/i.test(unescaped);
+  }
+
+  const gifMatch = unescaped.match(
+    /https?:\/\/i\.pinimg\.com\/originals\/[^\s"'\\]+\.gif/i,
+  );
+  if (gifMatch) {
+    imageUrl = gifMatch[0];
+    isGif = true;
   }
 
   if (!imageUrl) {
     const origMatch =
-      html.match(
-        /https?:\/\/i\.pinimg\.com\/originals\/[^"'\s\\]+\.(?:jpg|png|webp)/i,
+      unescaped.match(
+        /https?:\/\/i\.pinimg\.com\/originals\/[^\s"'\\]+\.(?:jpg|jpeg|png|webp|gif)/i,
       ) ||
-      html.match(
-        /https?:\/\/i\.pinimg\.com\/736x\/[^"'\s\\]+\.(?:jpg|png|webp)/i,
+      unescaped.match(
+        /https?:\/\/i\.pinimg\.com\/736x\/[^\s"'\\]+\.(?:jpg|jpeg|png|webp|gif)/i,
       );
     if (origMatch) {
-      imageUrl = cleanUrl(origMatch[0]);
+      imageUrl = origMatch[0];
     }
   }
 
@@ -388,21 +527,23 @@ function extractFromHtml(html: string): {
     const ogTitle = html.match(
       /<meta\s+(?:property|name)=["']og:title["']\s+content=["']([^"']+)["']/i,
     );
-    title = ogTitle ? decode(ogTitle[1]) : undefined;
+    title = ogTitle ? cleanUrl(ogTitle[1]) : undefined;
   }
 
   if (!description) {
     const ogDesc = html.match(
       /<meta\s+(?:property|name)=["']og:description["']\s+content=["']([^"']+)["']/i,
     );
-    description = ogDesc ? decode(ogDesc[1]) : undefined;
+    description = ogDesc ? cleanUrl(ogDesc[1]) : undefined;
   }
 
   const media: CleanedMedia[] = [];
   if (videoUrl) {
     media.push({ type: "video", url: cleanUrl(videoUrl)! });
-  }
-  if (imageUrl && (!videoUrl || imageUrl !== videoUrl)) {
+  } else if (isGif && imageUrl) {
+    const cleanGif = imageUrl.replace(/\.(?:jpg|jpeg|png|webp)$/i, ".gif");
+    media.push({ type: "gif", url: cleanUrl(cleanGif)! });
+  } else if (imageUrl) {
     media.push({ type: "photo", url: cleanUrl(imageUrl)! });
   }
 
@@ -446,6 +587,32 @@ export async function scrapePinterest(
   }
 
   const fetchStartTime = performance.now();
+  const cookie = await getPinterestCookies();
+  const pinId = extractPinId(resolvedUrl);
+
+  if (pinId) {
+    const apiResult = await fetchPinResource(pinId, cookie);
+    if (apiResult && apiResult.media.length > 0) {
+      timings.fetchTime = performance.now() - fetchStartTime;
+      timings.processTime =
+        performance.now() - (fetchStartTime + timings.fetchTime);
+      timings.totalTime = performance.now() - totalStartTime;
+
+      const result: ExtractionResult = {
+        status: "success",
+        title: apiResult.title,
+        author: apiResult.author,
+        description: apiResult.description,
+        thumbnail: apiResult.thumbnail,
+        media: apiResult.media,
+        timings,
+        cached: false,
+      };
+
+      pinCache.set(cacheKey, result);
+      return result;
+    }
+  }
 
   try {
     let response = await fetch(resolvedUrl, {
@@ -454,9 +621,10 @@ export async function scrapePinterest(
     });
 
     if (
-      (!response.ok || response.status === 403 || response.status === 401)
+      !response.ok ||
+      response.status === 403 ||
+      response.status === 401
     ) {
-      const cookie = await getPinterestCookies();
       if (cookie) {
         response = await fetch(resolvedUrl, {
           headers: { ...BROWSER_HEADERS, Cookie: cookie },
