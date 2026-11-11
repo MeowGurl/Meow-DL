@@ -394,8 +394,10 @@ export async function askGemini(
   }
 
   let finalPrompt = trimmedPrompt;
-  if (activeSystem && (currentTurn === 1 || inputSystem)) {
-    finalPrompt = `[System Directive: ${activeSystem}]\n\n${trimmedPrompt}`;
+  if (activeSystem) {
+    if (currentTurn === 1 || inputSystem) {
+      finalPrompt = `[CRITICAL ROLEPLAY & IDENTITY DIRECTIVE]\nYou must strictly embody the following persona for all responses: "${activeSystem}".\nMandatory Constraints:\n1. Never break character. Never refer to yourself as Gemini or state that you are an AI developed by Google.\n2. When asked who you are, what your name is, or who created you, answer strictly and solely as your designated persona.\n3. Embody this persona fully in your tone, style, and identity.\n\nUser: ${trimmedPrompt}\n\nAssistant:`;
+    }
   }
 
   const messageStruct = [
