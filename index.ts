@@ -1806,6 +1806,52 @@ const app = new Elysia()
       }),
     },
   )
+    .get(
+    "/g",
+    async ({ query, set }) => {
+      const prompt = (query.prompt || "").trim();
+      const model = query.model || "gemini-auto";
+      const uid = query.uid ? String(query.uid).trim() : undefined;
+      const system = query.system ? String(query.system).trim() : undefined;
+      const result = await geminiHandler(prompt, model, uid, system);
+      if (result.status === "fetch_error") {
+        set.status = 502;
+      }
+      return result;
+    },
+    {
+      query: t.Object({
+        prompt: t.Optional(t.String()),
+        model: t.Optional(t.String()),
+        uid: t.Optional(t.String()),
+        system: t.Optional(t.String()),
+      }),
+    },
+  )
+  .post(
+    "/g",
+    async ({ body, set }: any) => {
+      const prompt = (body?.prompt || "").trim();
+      const model = body?.model || "gemini-auto";
+      const uid = body?.uid ? String(body.uid).trim() : undefined;
+      const system = body?.system ? String(body.system).trim() : undefined;
+      const result = await geminiHandler(prompt, model, uid, system);
+      if (result.status === "fetch_error") {
+        set.status = 502;
+      }
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object({
+          prompt: t.Optional(t.String()),
+          model: t.Optional(t.String()),
+          uid: t.Optional(t.String()),
+          system: t.Optional(t.String()),
+        }),
+      ),
+    },
+  )
   .get(
     "/pin",
     async ({ query, request, set }) => {
@@ -1851,44 +1897,6 @@ const app = new Elysia()
         search: t.Optional(t.String()),
         limit: t.Optional(t.String()),
       }),
-    },
-  )
-  .get(
-    "/g",
-    async ({ query, set }) => {
-      const prompt = (query.prompt || "").trim();
-      const model = query.model || "gemini-auto";
-      const result = await geminiHandler(prompt, model);
-      if (result.status === "fetch_error") {
-        set.status = 502;
-      }
-      return result;
-    },
-    {
-      query: t.Object({
-        prompt: t.Optional(t.String()),
-        model: t.Optional(t.String()),
-      }),
-    },
-  )
-  .post(
-    "/g",
-    async ({ body, set }: any) => {
-      const prompt = (body?.prompt || "").trim();
-      const model = body?.model || "gemini-auto";
-      const result = await geminiHandler(prompt, model);
-      if (result.status === "fetch_error") {
-        set.status = 502;
-      }
-      return result;
-    },
-    {
-      body: t.Optional(
-        t.Object({
-          prompt: t.Optional(t.String()),
-          model: t.Optional(t.String()),
-        }),
-      ),
     },
   )
   .get("/pin/stats", () => getCacheStats())
