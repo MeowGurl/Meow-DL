@@ -49,6 +49,9 @@ export type GeminiResult =
       model: string;
       prompt: string;
       response: string;
+      uid?: string;
+      turn?: number;
+      system?: string;
       timings: {
         fetchTime: number;
         totalTime: number;
@@ -58,6 +61,7 @@ export type GeminiResult =
       status: "fetch_error" | "invalid_prompt";
       model: string;
       prompt: string;
+      uid?: string;
       error: string;
       timings: {
         fetchTime: number;
@@ -65,14 +69,32 @@ export type GeminiResult =
       };
     };
 
+interface SessionContext {
+  conversationId: string;
+  responseId: string;
+  choiceId: string;
+  turn: number;
+  lastUsed: number;
+  system?: string;
+}
+
 const COOKIE_FILE_PATHS = [
   join(process.cwd(), "api", "gemini.txt"),
   join(process.cwd(), "gemini.txt"),
   join(process.cwd(), "cookies.txt"),
 ];
 
+const SYSTEM_FILE_PATHS = [
+  join(process.cwd(), "api", "system.txt"),
+  join(process.cwd(), "system.txt"),
+];
+
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+const userSessions = new Map<string, SessionContext>();
+const MAX_SESSIONS = 5000;
+const SESSION_TTL = 2 * 60 * 60 * 1000;
 
 let cachedAtToken: string | null = null;
 let cachedBuildLabel: string | null = null;
@@ -145,6 +167,19 @@ async function getGeminiCookies(): Promise<string | null> {
   return null;
 }
 
+async function getDefaultSystemInstruction(): Promise<string | null> {
+  if (process.env.GEMINI_SYSTEM_INSTRUCTION?.trim()) {
+    return process.env.GEMINI_SYSTEM_INSTRUCTION.trim();
+  }
+  for (const path of SYSTEM_FILE_PATHS) {
+    try {
+      const content = await readFile(path, "utf-8");
+      if (content.trim()) return content.trim();
+    } catch {}
+  }
+  return null;
+}
+
 async function tryExtractSessionTokens(cookie: string): Promise<{
   at: string | null;
   bl: string | null;
@@ -203,9 +238,17 @@ async function tryExtractSessionTokens(cookie: string): Promise<{
   return { at: cachedAtToken, bl: cachedBuildLabel };
 }
 
-function parseGeminiStream(responseText: string): string {
+function parseGeminiStream(responseText: string): {
+  text: string;
+  conversationId?: string;
+  responseId?: string;
+  choiceId?: string;
+} {
   const lines = responseText.split("\n");
   let accumulatedText = "";
+  let conversationId: string | undefined = undefined;
+  let responseId: string | undefined = undefined;
+  let choiceId: string | undefined = undefined;
 
   for (const line of lines) {
     if (!line.includes("wrb.fr")) continue;
@@ -217,11 +260,18 @@ function parseGeminiStream(responseText: string): string {
       const payloadString = Array.isArray(parsed) ? parsed[0]?.[2] : null;
       if (typeof payloadString === "string") {
         const payload = JSON.parse(payloadString);
-        const candidates = payload?.[4];
-        if (Array.isArray(candidates) && candidates.length > 0) {
-          const textCandidate = candidates[0]?.[1]?.[0];
-          if (typeof textCandidate === "string" && textCandidate.trim()) {
-            accumulatedText = textCandidate;
+        if (Array.isArray(payload)) {
+          if (Array.isArray(payload[1])) {
+            conversationId = conversationId || payload[1][0];
+            responseId = responseId || payload[1][1];
+          }
+          const candidates = payload[4];
+          if (Array.isArray(candidates) && candidates.length > 0) {
+            choiceId = choiceId || candidates[0]?.[0];
+            const textCandidate = candidates[0]?.[1]?.[0];
+            if (typeof textCandidate === "string" && textCandidate.trim()) {
+              accumulatedText = textCandidate;
+            }
           }
         }
       }
@@ -239,26 +289,76 @@ function parseGeminiStream(responseText: string): string {
     }
   }
 
-  return accumulatedText;
+  if (!conversationId) {
+    const cMatch = responseText.match(/c_[a-zA-Z0-9_-]+/);
+    if (cMatch) conversationId = cMatch[0];
+  }
+  if (!responseId) {
+    const rMatch = responseText.match(/r_[a-zA-Z0-9_-]+/);
+    if (rMatch) responseId = rMatch[0];
+  }
+  if (!choiceId) {
+    const rcMatch = responseText.match(/rc_[a-zA-Z0-9_-]+/);
+    if (rcMatch) choiceId = rcMatch[0];
+  }
+
+  return {
+    text: accumulatedText,
+    conversationId,
+    responseId,
+    choiceId,
+  };
+}
+
+export function resetSession(uid: string): boolean {
+  if (!uid) return false;
+  return userSessions.delete(String(uid).trim());
+}
+
+export function getSessionStats() {
+  return {
+    activeSessions: userSessions.size,
+    maxSessions: MAX_SESSIONS,
+  };
 }
 
 export async function askGemini(
   prompt?: string,
   model?: string,
+  uid?: string,
+  system?: string,
 ): Promise<GeminiResult> {
   const resolvedTargetModel = resolveModel(model);
+  const cleanUid = uid ? String(uid).trim() : undefined;
+  const inputSystem = system ? String(system).trim() : undefined;
 
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     return {
       status: "info",
       message: "Provide a prompt query parameter to generate a response.",
-      example: "/g?prompt=Your+Question&model=gemini-flash",
+      example:
+        "/g?prompt=Your+Question&model=gemini-flash&uid=12345&system=You+are+Queen+AI",
       defaultModel: "gemini-auto",
       availableModels: AVAILABLE_MODELS,
     };
   }
 
   const trimmedPrompt = prompt.trim();
+  const lowerPrompt = trimmedPrompt.toLowerCase();
+
+  if (cleanUid && (lowerPrompt === "clear" || lowerPrompt === "reset")) {
+    userSessions.delete(cleanUid);
+    return {
+      status: "success",
+      model: resolvedTargetModel,
+      prompt: trimmedPrompt,
+      response: `Chat history cleared for uid: ${cleanUid}`,
+      uid: cleanUid,
+      turn: 0,
+      timings: { fetchTime: 0, totalTime: 0 },
+    };
+  }
+
   const totalStartTime = performance.now();
   const timings = { fetchTime: 0, totalTime: 0 };
 
@@ -268,10 +368,40 @@ export async function askGemini(
     : { at: null, bl: null };
 
   const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
+
+  let conversationId = "";
+  let responseId = "";
+  let choiceId = "";
+  let currentTurn = 1;
+  let activeSystem = inputSystem;
+
+  if (cleanUid && userSessions.has(cleanUid)) {
+    const existing = userSessions.get(cleanUid)!;
+    if (Date.now() - existing.lastUsed < SESSION_TTL) {
+      conversationId = existing.conversationId || "";
+      responseId = existing.responseId || "";
+      choiceId = existing.choiceId || "";
+      currentTurn = (existing.turn || 0) + 1;
+      activeSystem = inputSystem || existing.system;
+    } else {
+      userSessions.delete(cleanUid);
+    }
+  }
+
+  if (!activeSystem) {
+    const defaultSys = await getDefaultSystemInstruction();
+    if (defaultSys) activeSystem = defaultSys;
+  }
+
+  let finalPrompt = trimmedPrompt;
+  if (activeSystem && (currentTurn === 1 || inputSystem)) {
+    finalPrompt = `[System Directive: ${activeSystem}]\n\n${trimmedPrompt}`;
+  }
+
   const messageStruct = [
-    [trimmedPrompt, 0, null, null, null, null, 0],
+    [finalPrompt, 0, null, null, null, null, 0],
     ["en"],
-    ["", "", "", null, null, []],
+    [conversationId, responseId, choiceId, null, null, []],
     null,
     null,
     null,
@@ -341,31 +471,51 @@ export async function askGemini(
         status: "fetch_error",
         model: resolvedTargetModel,
         prompt: trimmedPrompt,
+        uid: cleanUid,
         error: `Gemini Web RPC returned HTTP ${response.status}`,
         timings,
       };
     }
 
     const rawResponse = await response.text();
-    const textOutput = parseGeminiStream(rawResponse);
+    const streamResult = parseGeminiStream(rawResponse);
 
     timings.totalTime = performance.now() - totalStartTime;
 
-    if (!textOutput) {
+    if (!streamResult.text) {
       return {
         status: "fetch_error",
         model: resolvedTargetModel,
         prompt: trimmedPrompt,
+        uid: cleanUid,
         error: "Empty or unparseable response from Gemini Web.",
         timings,
       };
+    }
+
+    if (cleanUid) {
+      if (userSessions.size >= MAX_SESSIONS) {
+        const oldestKey = userSessions.keys().next().value;
+        if (oldestKey !== undefined) userSessions.delete(oldestKey);
+      }
+      userSessions.set(cleanUid, {
+        conversationId: streamResult.conversationId || conversationId,
+        responseId: streamResult.responseId || responseId,
+        choiceId: streamResult.choiceId || choiceId,
+        turn: currentTurn,
+        lastUsed: Date.now(),
+        system: activeSystem,
+      });
     }
 
     return {
       status: "success",
       model: resolvedTargetModel,
       prompt: trimmedPrompt,
-      response: textOutput,
+      response: streamResult.text,
+      uid: cleanUid,
+      turn: cleanUid ? currentTurn : undefined,
+      system: activeSystem,
       timings,
     };
   } catch (error) {
@@ -374,6 +524,7 @@ export async function askGemini(
       status: "fetch_error",
       model: resolvedTargetModel,
       prompt: trimmedPrompt,
+      uid: cleanUid,
       error:
         error instanceof Error
           ? error.message
@@ -383,6 +534,11 @@ export async function askGemini(
   }
 }
 
-export default async function handler(prompt?: string, model?: string) {
-  return await askGemini(prompt, model);
+export default async function handler(
+  prompt?: string,
+  model?: string,
+  uid?: string,
+  system?: string,
+) {
+  return await askGemini(prompt, model, uid, system);
 }
