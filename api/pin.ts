@@ -31,8 +31,10 @@ export type SearchResult = {
   query?: string;
   results?: Array<{
     id: string;
+    type?: "video" | "photo" | "gif";
     title: string;
     image: string;
+    video?: string;
     url: string;
     author?: string;
     description?: string;
@@ -685,7 +687,7 @@ let cachedAppVersion = "c3386b8";
 
 function extractCookieValue(cookieStr: string | null, name: string): string | null {
   if (!cookieStr) return null;
-  const match = cookieStr.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  const match = cookieStr.match(new RegExp(`(?:^|;\s*)${name}=([^;]+)`));
   return match ? match[1].trim() : null;
 }
 
@@ -712,21 +714,71 @@ function mergeSetCookies(baseCookie: string | null, res: Response): string {
     .join("; ");
 }
 
+function pickBestVideoFromList(videoList: any): string | undefined {
+  if (!videoList || typeof videoList !== "object") return undefined;
+  const formats = Object.values(videoList)
+    .filter((v: any) => v && typeof v === "object" && typeof v.url === "string")
+    .sort((a: any, b: any) => {
+      const aMp4 = a.url.includes(".mp4") ? 1 : 0;
+      const bMp4 = b.url.includes(".mp4") ? 1 : 0;
+      if (aMp4 !== bMp4) return bMp4 - aMp4;
+      return (
+        (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0)
+      );
+    });
+  return formats.length > 0 ? cleanUrl((formats[0] as any).url) : undefined;
+}
+
+function extractPinVideoFromObject(pin: any): string | undefined {
+  if (!pin || typeof pin !== "object") return undefined;
+  const direct = pickBestVideoFromList(pin.videos?.video_list);
+  if (direct) return direct;
+  const pages = pin.story_pin_data?.pages;
+  if (Array.isArray(pages)) {
+    for (const page of pages) {
+      if (!Array.isArray(page?.blocks)) continue;
+      for (const block of page.blocks) {
+        const blockVid = pickBestVideoFromList(block?.video?.video_list);
+        if (blockVid) return blockVid;
+      }
+    }
+  }
+  const queue: any[] = [pin];
+  let visited = 0;
+  while (queue.length > 0 && visited < 80) {
+    const node = queue.shift();
+    visited++;
+    if (!node || typeof node !== "object") continue;
+    if (node.video_list && typeof node.video_list === "object") {
+      const found = pickBestVideoFromList(node.video_list);
+      if (found) return found;
+    }
+    for (const val of Object.values(node)) {
+      if (val && typeof val === "object") queue.push(val);
+    }
+  }
+  return undefined;
+}
+
 function extractPinsFromSearchHtml(
   html: string,
   limit: number,
 ): Array<{
   id: string;
+  type?: "video" | "photo" | "gif";
   title: string;
   image: string;
+  video?: string;
   url: string;
   author?: string;
   description?: string;
 }> {
   const results: Array<{
     id: string;
+    type?: "video" | "photo" | "gif";
     title: string;
     image: string;
+    video?: string;
     url: string;
     author?: string;
     description?: string;
@@ -768,8 +820,23 @@ function extractPinsFromSearchHtml(
               /\/(?:236x|474x|564x|736x)\//,
               "/originals/",
             );
+            const videoUrl = extractPinVideoFromObject(curr);
+            const isGif =
+              curr.is_gif === true ||
+              curr.is_animated === true ||
+              origImg.toLowerCase().includes(".gif");
+            const type: "video" | "photo" | "gif" = videoUrl
+              ? "video"
+              : isGif
+                ? "gif"
+                : "photo";
+            const finalImage =
+              type === "gif"
+                ? origImg.replace(/\.(?:jpg|jpeg|png|webp)$/i, ".gif")
+                : origImg;
             results.push({
               id: id || `pin-${results.length}`,
+              type,
               title:
                 curr.title ||
                 curr.grid_title ||
@@ -777,7 +844,8 @@ function extractPinsFromSearchHtml(
                 curr.auto_alt_text ||
                 curr.description ||
                 "Untitled Pin",
-              image: origImg,
+              image: finalImage,
+              ...(videoUrl ? { video: videoUrl } : {}),
               url: id
                 ? `https://www.pinterest.com/pin/${id}/`
                 : curr.link || "",
@@ -944,8 +1012,10 @@ export async function searchPinterest(
 
     const results: Array<{
       id: string;
+      type?: "video" | "photo" | "gif";
       title: string;
       image: string;
+      video?: string;
       url: string;
       author?: string;
       description?: string;
@@ -958,11 +1028,28 @@ export async function searchPinterest(
           pin.images?.["736x"]?.url ||
           pin.images?.["474x"]?.url ||
           "";
+        const cleanedImage = cleanUrl(image) || "";
+        const videoUrl = extractPinVideoFromObject(pin);
+        const isGif =
+          pin.is_gif === true ||
+          pin.is_animated === true ||
+          cleanedImage.toLowerCase().includes(".gif");
+        const type: "video" | "photo" | "gif" = videoUrl
+          ? "video"
+          : isGif
+            ? "gif"
+            : "photo";
+        const finalImage =
+          type === "gif"
+            ? cleanedImage.replace(/\.(?:jpg|jpeg|png|webp)$/i, ".gif")
+            : cleanedImage;
         results.push({
           id: pin.id || `pin-${results.length}`,
+          type,
           title:
             pin.title || pin.grid_title || pin.description || "Untitled Pin",
-          image: cleanUrl(image) || "",
+          image: finalImage,
+          ...(videoUrl ? { video: videoUrl } : {}),
           url: pin.link || `https://www.pinterest.com/pin/${pin.id}/`,
           author: pin.pinner?.username || pin.pinner?.full_name,
           description: pin.description || pin.seo_description,
