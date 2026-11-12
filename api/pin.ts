@@ -183,6 +183,7 @@ class RateLimiter {
 const COOKIE_FILE_PATHS = [
   join(process.cwd(), "api", "pin.txt"),
   join(process.cwd(), "pin.txt"),
+  join(process.cwd(), "cookies.txt"),
 ];
 
 const BROWSER_HEADERS: Record<string, string> = {
@@ -680,6 +681,146 @@ export async function scrapePinterest(
   }
 }
 
+let cachedAppVersion = "c3386b8";
+
+function extractCookieValue(cookieStr: string | null, name: string): string | null {
+  if (!cookieStr) return null;
+  const match = cookieStr.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? match[1].trim() : null;
+}
+
+function mergeSetCookies(baseCookie: string | null, res: Response): string {
+  const map = new Map<string, string>();
+  if (baseCookie) {
+    for (const part of baseCookie.split(";")) {
+      const clean = part.trim();
+      const eq = clean.indexOf("=");
+      if (eq > 0) map.set(clean.slice(0, eq).trim(), clean.slice(eq + 1).trim());
+    }
+  }
+  const setCookies =
+    typeof (res.headers as any).getSetCookie === "function"
+      ? (res.headers as any).getSetCookie()
+      : [];
+  for (const sc of setCookies) {
+    const pair = String(sc).split(";")[0];
+    const eq = pair.indexOf("=");
+    if (eq > 0) map.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
+  return Array.from(map.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function extractPinsFromSearchHtml(
+  html: string,
+  limit: number,
+): Array<{
+  id: string;
+  title: string;
+  image: string;
+  url: string;
+  author?: string;
+  description?: string;
+}> {
+  const results: Array<{
+    id: string;
+    title: string;
+    image: string;
+    url: string;
+    author?: string;
+    description?: string;
+  }> = [];
+  const seen = new Set<string>();
+
+  const scriptMatches =
+    html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  for (const block of scriptMatches) {
+    if (results.length >= limit) break;
+    const inner = block.replace(/<\/?script[^>]*>/gi, "").trim();
+    if (!inner.startsWith("{") && !inner.startsWith("[")) continue;
+    try {
+      const data = JSON.parse(inner);
+      const queue: any[] = [data];
+      while (queue.length > 0 && results.length < limit) {
+        const curr = queue.shift();
+        if (!curr || typeof curr !== "object") continue;
+
+        if (curr.app_version && typeof curr.app_version === "string") {
+          cachedAppVersion = curr.app_version;
+        }
+
+        if (
+          (curr.type === "pin" || (curr.id && curr.images)) &&
+          curr.images &&
+          typeof curr.images === "object"
+        ) {
+          const id = String(curr.id || "");
+          const img =
+            curr.images.orig?.url ||
+            curr.images["736x"]?.url ||
+            curr.images["474x"]?.url ||
+            curr.images["236x"]?.url;
+          if (img && !seen.has(id || img)) {
+            seen.add(id || img);
+            const cleanedImg = cleanUrl(img) || img;
+            const origImg = cleanedImg.replace(
+              /\/(?:236x|474x|564x|736x)\//,
+              "/originals/",
+            );
+            results.push({
+              id: id || `pin-${results.length}`,
+              title:
+                curr.title ||
+                curr.grid_title ||
+                curr.seo_alt_text ||
+                curr.auto_alt_text ||
+                curr.description ||
+                "Untitled Pin",
+              image: origImg,
+              url: id
+                ? `https://www.pinterest.com/pin/${id}/`
+                : curr.link || "",
+              author: curr.pinner?.username || curr.pinner?.full_name,
+              description: curr.description || curr.seo_description,
+            });
+          }
+        }
+
+        for (const val of Object.values(curr)) {
+          if (val && typeof val === "object") queue.push(val);
+        }
+      }
+    } catch {}
+  }
+
+  if (results.length === 0) {
+    const unescaped = html.replace(/\\\//g, "/");
+    const imgMatches =
+      unescaped.match(
+        /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x|236x)\/[a-f0-9/]+\.(?:jpg|jpeg|png|webp|gif)/gi,
+      ) || [];
+    for (const img of imgMatches) {
+      if (results.length >= limit) break;
+      const upgraded = img.replace(
+        /\/(?:236x|474x|564x|736x)\//i,
+        "/originals/",
+      );
+      if (!seen.has(upgraded)) {
+        seen.add(upgraded);
+        results.push({
+          id: `pin-${results.length}`,
+          title: "Pinterest Pin",
+          image: upgraded,
+          url: upgraded,
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
 export async function searchPinterest(
   query: string,
   clientId = "default",
@@ -709,7 +850,8 @@ export async function searchPinterest(
   }
 
   const encodedQuery = encodeURIComponent(query.trim());
-  const searchUrl = `https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=/search/pins/?q=${encodedQuery}&data=${encodeURIComponent(
+  const sourceUrl = `/search/pins/?q=${encodedQuery}`;
+  const searchApiUrl = `https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=${encodeURIComponent(sourceUrl)}&data=${encodeURIComponent(
     JSON.stringify({
       options: {
         query: query.trim(),
@@ -723,19 +865,72 @@ export async function searchPinterest(
   const fetchStartTime = performance.now();
 
   try {
-    const cookie = await getPinterestCookies();
-    const headers = {
-      ...API_HEADERS,
-      ...(cookie ? { Cookie: cookie } : {}),
-    };
+    let cookie = await getPinterestCookies();
+    let csrfToken = extractCookieValue(cookie, "csrftoken");
 
-    const response = await fetch(searchUrl, {
-      headers,
+    const buildSearchHeaders = (c: string | null, csrf: string | null) => ({
+      ...API_HEADERS,
+      Referer: `https://www.pinterest.com${sourceUrl}`,
+      "X-Pinterest-AppState": "active",
+      "X-Pinterest-Source-Url": sourceUrl,
+      "X-Pinterest-Pws-Handler": "www/search/[scope].js",
+      "X-APP-VERSION": cachedAppVersion,
+      ...(csrf ? { "X-CSRFToken": csrf } : {}),
+      ...(c ? { Cookie: c } : {}),
     });
+
+    let response = await fetch(searchApiUrl, {
+      headers: buildSearchHeaders(cookie, csrfToken),
+    });
+
+    if (!response.ok) {
+      const pageUrl = `https://www.pinterest.com${sourceUrl}`;
+      const pageRes = await fetch(pageUrl, {
+        headers: {
+          ...BROWSER_HEADERS,
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+        redirect: "follow",
+      });
+
+      if (pageRes.ok) {
+        const html = await pageRes.text();
+        const appVerMatch = html.match(/"app_version":"([^"]+)"/);
+        if (appVerMatch?.[1]) cachedAppVersion = appVerMatch[1];
+
+        const htmlResults = extractPinsFromSearchHtml(html, limit);
+        if (htmlResults.length > 0) {
+          timings.fetchTime = performance.now() - fetchStartTime;
+          timings.processTime =
+            performance.now() - (fetchStartTime + timings.fetchTime);
+          timings.totalTime = performance.now() - totalStartTime;
+
+          const searchResult: SearchResult = {
+            status: "success",
+            query,
+            results: htmlResults,
+            count: htmlResults.length,
+            timings,
+            cached: false,
+          };
+          searchCache.set(cacheKey, searchResult);
+          return searchResult;
+        }
+
+        const mergedCookie = mergeSetCookies(cookie, pageRes);
+        const freshCsrf = extractCookieValue(mergedCookie, "csrftoken");
+        if (freshCsrf) {
+          response = await fetch(searchApiUrl, {
+            headers: buildSearchHeaders(mergedCookie, freshCsrf),
+          });
+        }
+      }
+    }
 
     timings.fetchTime = performance.now() - fetchStartTime;
 
     if (!response.ok) {
+      timings.totalTime = performance.now() - totalStartTime;
       return {
         status: "error",
         error: `HTTP ${response.status}`,
