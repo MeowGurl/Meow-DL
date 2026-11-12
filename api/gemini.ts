@@ -49,6 +49,7 @@ export type GeminiResult =
       model: string;
       prompt: string;
       response: string;
+      images?: string[];
       uid?: string;
       turn?: number;
       system?: string;
@@ -92,12 +93,16 @@ const SYSTEM_FILE_PATHS = [
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
+const UPLOAD_URL = "https://content-push.googleapis.com/upload/";
+const DEFAULT_PUSH_ID = "feeds/mcudyrk2a4khkz";
+
 const userSessions = new Map<string, SessionContext>();
 const MAX_SESSIONS = 5000;
 const SESSION_TTL = 2 * 60 * 60 * 1000;
 
 let cachedAtToken: string | null = null;
 let cachedBuildLabel: string | null = null;
+let cachedPushId: string = DEFAULT_PUSH_ID;
 let tokenExpiresAt = 0;
 
 function resolveModel(input?: string): string {
@@ -183,9 +188,10 @@ async function getDefaultSystemInstruction(): Promise<string | null> {
 async function tryExtractSessionTokens(cookie: string): Promise<{
   at: string | null;
   bl: string | null;
+  pushId: string;
 }> {
   if (cachedAtToken && Date.now() < tokenExpiresAt) {
-    return { at: cachedAtToken, bl: cachedBuildLabel };
+    return { at: cachedAtToken, bl: cachedBuildLabel, pushId: cachedPushId };
   }
 
   const candidateUrls = [
@@ -222,6 +228,8 @@ async function tryExtractSessionTokens(cookie: string): Promise<{
         html.match(/"bl":"([^"]+)"/) ||
         html.match(/boq_assistant-bard-web-server_[0-9a-zA-Z._-]+/);
 
+      const pushIdMatch = html.match(/qKIAYe(?:\\?"|"):\\?"(.*?)(?:\\?"|")/);
+
       if (atMatch?.[1]) {
         cachedAtToken = atMatch[1];
         tokenExpiresAt = Date.now() + 30 * 60 * 1000;
@@ -230,22 +238,166 @@ async function tryExtractSessionTokens(cookie: string): Promise<{
         cachedBuildLabel =
           typeof blMatch === "string" ? blMatch : blMatch[1] || blMatch[0];
       }
+      if (pushIdMatch?.[1]) {
+        cachedPushId = pushIdMatch[1];
+      }
 
       if (cachedAtToken) break;
     } catch {}
   }
 
-  return { at: cachedAtToken, bl: cachedBuildLabel };
+  return { at: cachedAtToken, bl: cachedBuildLabel, pushId: cachedPushId };
+}
+
+function inferFilenameFromMime(mime: string, fallbackUrl?: string): string {
+  if (fallbackUrl) {
+    try {
+      const pathname = new URL(fallbackUrl).pathname;
+      const base = pathname.split("/").pop();
+      if (base && base.includes(".")) return base.slice(0, 64);
+    } catch {}
+  }
+  const cleanMime = mime.toLowerCase().split(";")[0].trim();
+  const extMap: Record<string, string> = {
+    "image/jpeg": "image.jpg",
+    "image/jpg": "image.jpg",
+    "image/png": "image.png",
+    "image/webp": "image.webp",
+    "image/gif": "image.gif",
+    "video/mp4": "video.mp4",
+    "video/webm": "video.webm",
+    "audio/mpeg": "audio.mp3",
+    "audio/mp3": "audio.mp3",
+    "audio/wav": "audio.wav",
+    "audio/ogg": "audio.ogg",
+    "application/pdf": "document.pdf",
+  };
+  return extMap[cleanMime] || "upload.bin";
+}
+
+async function resolveMediaBytes(
+  input: string,
+): Promise<{ buffer: Uint8Array; fileName: string } | null> {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith("data:")) {
+    const match = trimmed.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    if (!match) return null;
+    const mime = match[1] || "image/png";
+    const isBase64 = Boolean(match[2]);
+    const raw = match[3];
+    const buffer = isBase64
+      ? Uint8Array.from(Buffer.from(raw, "base64"))
+      : Uint8Array.from(Buffer.from(decodeURIComponent(raw), "utf-8"));
+    return { buffer, fileName: inferFilenameFromMime(mime) };
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    const res = await fetch(trimmed, {
+      headers: { "User-Agent": USER_AGENT },
+    });
+    if (!res.ok) return null;
+    const arrayBuffer = await res.arrayBuffer();
+    const contentType = res.headers.get("content-type") || "image/jpeg";
+    return {
+      buffer: new Uint8Array(arrayBuffer),
+      fileName: inferFilenameFromMime(contentType, trimmed),
+    };
+  }
+
+  return null;
+}
+
+async function uploadMediaToGemini(
+  mediaInput: string,
+  cookie: string | null,
+  pushId: string,
+): Promise<[string, string] | null> {
+  try {
+    const resolved = await resolveMediaBytes(mediaInput);
+    if (!resolved || resolved.buffer.byteLength === 0) return null;
+
+    const baseHeaders: Record<string, string> = {
+      accept: "*/*",
+      "accept-language": "en-US,en;q=0.7",
+      authorization: "Basic c2F2ZXM6cyNMdGhlNmxzd2F2b0RsN3J1d1U=",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      origin: "https://gemini.google.com",
+      "push-id": pushId || DEFAULT_PUSH_ID,
+      referer: "https://gemini.google.com/",
+      "user-agent": USER_AGENT,
+      "x-goog-upload-command": "start",
+      "x-goog-upload-header-content-length": String(resolved.buffer.byteLength),
+      "x-goog-upload-protocol": "resumable",
+      "x-tenant-id": "bard-storage",
+      size: String(resolved.buffer.byteLength),
+    };
+
+    if (cookie) {
+      baseHeaders["Cookie"] = cookie;
+    }
+
+    const startRes = await fetch(UPLOAD_URL, {
+      method: "POST",
+      headers: baseHeaders,
+      body: `File name: ${resolved.fileName}`,
+    });
+
+    if (!startRes.ok) return null;
+
+    const uploadUrl = startRes.headers.get("x-goog-upload-url");
+    if (!uploadUrl) return null;
+
+    const finalizeHeaders: Record<string, string> = {
+      ...baseHeaders,
+      "x-goog-upload-command": "upload, finalize",
+      "x-goog-upload-offset": "0",
+    };
+
+    const uploadRes = await fetch(uploadUrl, {
+      method: "POST",
+      headers: finalizeHeaders,
+      body: resolved.buffer,
+    });
+
+    if (!uploadRes.ok) return null;
+
+    const identifier = (await uploadRes.text()).trim();
+    if (!identifier) return null;
+
+    return [identifier, resolved.fileName];
+  } catch {
+    return null;
+  }
+}
+
+function cleanResponseText(text: string): string {
+  return text
+    .replace(/\[Imagen of .*?\]/g, "")
+    .replace(
+      /https?:\/\/googleusercontent\.com\/(?:image_generation|youtube|map)_content\/\d+/g,
+      "",
+    )
+    .replace(/<!-- end list -->/g, "")
+    .replace(
+      /```(?:python|javascript|text)\?code_(?:reference|stdout)&code_event_index=\d+\n[\s\S]*?```\n?/g,
+      "",
+    )
+    .trim();
 }
 
 function parseGeminiStream(responseText: string): {
   text: string;
+  images: string[];
   conversationId?: string;
   responseId?: string;
   choiceId?: string;
 } {
   const lines = responseText.split("\n");
   let accumulatedText = "";
+  const images: string[] = [];
+  const seenImages = new Set<string>();
   let conversationId: string | undefined = undefined;
   let responseId: string | undefined = undefined;
   let choiceId: string | undefined = undefined;
@@ -267,10 +419,38 @@ function parseGeminiStream(responseText: string): {
           }
           const candidates = payload[4];
           if (Array.isArray(candidates) && candidates.length > 0) {
-            choiceId = choiceId || candidates[0]?.[0];
-            const textCandidate = candidates[0]?.[1]?.[0];
+            const firstCandidate = candidates[0];
+            choiceId = choiceId || firstCandidate?.[0];
+            const textCandidate = firstCandidate?.[1]?.[0];
             if (typeof textCandidate === "string" && textCandidate.trim()) {
               accumulatedText = textCandidate;
+            }
+            const generatedGroup = firstCandidate?.[12]?.[7]?.[0];
+            if (Array.isArray(generatedGroup)) {
+              for (const imgObj of generatedGroup) {
+                const imgData = imgObj?.[0]?.[3]?.[3];
+                let rawImgUrl: string | undefined;
+                if (Array.isArray(imgData)) {
+                  rawImgUrl = imgData.find(
+                    (item) =>
+                      typeof item === "string" && item.startsWith("http"),
+                  );
+                } else if (
+                  typeof imgData === "string" &&
+                  imgData.startsWith("http")
+                ) {
+                  rawImgUrl = imgData;
+                }
+                if (rawImgUrl) {
+                  const fullUrl = rawImgUrl.includes("=s")
+                    ? rawImgUrl
+                    : `${rawImgUrl}=s2048`;
+                  if (!seenImages.has(fullUrl)) {
+                    seenImages.add(fullUrl);
+                    images.push(fullUrl);
+                  }
+                }
+              }
             }
           }
         }
@@ -289,6 +469,20 @@ function parseGeminiStream(responseText: string): {
     }
   }
 
+  if (images.length === 0) {
+    const fallbackImgMatches =
+      responseText.match(
+        /https:\/\/lh3\.googleusercontent\.com\/(?:gg-dl|rd-gg)\/[A-Za-z0-9_=-]+/g,
+      ) || [];
+    for (const url of fallbackImgMatches) {
+      const fullUrl = url.includes("=s") ? url : `${url}=s2048`;
+      if (!seenImages.has(fullUrl)) {
+        seenImages.add(fullUrl);
+        images.push(fullUrl);
+      }
+    }
+  }
+
   if (!conversationId) {
     const cMatch = responseText.match(/c_[a-zA-Z0-9_-]+/);
     if (cMatch) conversationId = cMatch[0];
@@ -303,7 +497,8 @@ function parseGeminiStream(responseText: string): {
   }
 
   return {
-    text: accumulatedText,
+    text: cleanResponseText(accumulatedText),
+    images,
     conversationId,
     responseId,
     choiceId,
@@ -327,23 +522,36 @@ export async function askGemini(
   model?: string,
   uid?: string,
   system?: string,
+  media?: string | string[],
 ): Promise<GeminiResult> {
   const resolvedTargetModel = resolveModel(model);
   const cleanUid = uid ? String(uid).trim() : undefined;
   const inputSystem = system ? String(system).trim() : undefined;
 
-  if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+  const mediaInputs = Array.isArray(media)
+    ? media.filter((m) => typeof m === "string" && m.trim())
+    : typeof media === "string" && media.trim()
+      ? [media.trim()]
+      : [];
+
+  if (
+    (!prompt || typeof prompt !== "string" || !prompt.trim()) &&
+    mediaInputs.length === 0
+  ) {
     return {
       status: "info",
       message: "Provide a prompt query parameter to generate a response.",
       example:
-        "/g?prompt=Your+Question&model=gemini-flash&uid=12345&system=You+are+Queen+AI",
+        "/g?prompt=Your+Question&model=gemini-flash&uid=12345&system=You+are+Queen+AI&media=https://example.com/image.jpg",
       defaultModel: "gemini-auto",
       availableModels: AVAILABLE_MODELS,
     };
   }
 
-  const trimmedPrompt = prompt.trim();
+  const trimmedPrompt =
+    prompt && prompt.trim()
+      ? prompt.trim()
+      : "Analyze and describe this media in detail.";
   const lowerPrompt = trimmedPrompt.toLowerCase();
 
   if (cleanUid && (lowerPrompt === "clear" || lowerPrompt === "reset")) {
@@ -363,9 +571,32 @@ export async function askGemini(
   const timings = { fetchTime: 0, totalTime: 0 };
 
   const cookie = await getGeminiCookies();
-  const { at, bl } = cookie
+  const { at, bl, pushId } = cookie
     ? await tryExtractSessionTokens(cookie)
-    : { at: null, bl: null };
+    : { at: null, bl: null, pushId: DEFAULT_PUSH_ID };
+
+  const uploadedRefs: Array<[[string, number], string]> = [];
+  if (mediaInputs.length > 0) {
+    const uploadResults = await Promise.all(
+      mediaInputs.map((m) => uploadMediaToGemini(m, cookie, pushId)),
+    );
+    for (const ref of uploadResults) {
+      if (ref) {
+        uploadedRefs.push([[ref[0], 1], ref[1]]);
+      }
+    }
+    if (uploadedRefs.length === 0) {
+      timings.totalTime = performance.now() - totalStartTime;
+      return {
+        status: "fetch_error",
+        model: resolvedTargetModel,
+        prompt: trimmedPrompt,
+        uid: cleanUid,
+        error: "Failed to upload media attachment to Gemini.",
+        timings,
+      };
+    }
+  }
 
   const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
 
@@ -401,7 +632,15 @@ export async function askGemini(
   }
 
   const messageStruct = [
-    [finalPrompt, 0, null, null, null, null, 0],
+    [
+      finalPrompt,
+      0,
+      null,
+      uploadedRefs.length > 0 ? uploadedRefs : null,
+      null,
+      null,
+      0,
+    ],
     ["en"],
     [conversationId, responseId, choiceId, null, null, []],
     null,
@@ -455,7 +694,7 @@ export async function askGemini(
       body: bodyParams.toString(),
     });
 
-    if (!response.ok && cookie) {
+    if (!response.ok && cookie && uploadedRefs.length === 0) {
       delete requestHeaders["Cookie"];
       bodyParams.delete("at");
       response = await fetch(rpcUrl, {
@@ -484,7 +723,7 @@ export async function askGemini(
 
     timings.totalTime = performance.now() - totalStartTime;
 
-    if (!streamResult.text) {
+    if (!streamResult.text && streamResult.images.length === 0) {
       return {
         status: "fetch_error",
         model: resolvedTargetModel,
@@ -515,6 +754,7 @@ export async function askGemini(
       model: resolvedTargetModel,
       prompt: trimmedPrompt,
       response: streamResult.text,
+      ...(streamResult.images.length > 0 ? { images: streamResult.images } : {}),
       uid: cleanUid,
       turn: cleanUid ? currentTurn : undefined,
       system: activeSystem,
@@ -541,6 +781,7 @@ export default async function handler(
   model?: string,
   uid?: string,
   system?: string,
+  media?: string | string[],
 ) {
-  return await askGemini(prompt, model, uid, system);
+  return await askGemini(prompt, model, uid, system, media);
 }
