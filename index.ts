@@ -1864,7 +1864,10 @@ const app = new Elysia()
       const clientId = getClientId(request);
 
       if (query.search) {
-        const parsedLimit = Number.parseInt(query.limit || "20", 10);
+        const parsedLimit = Number.parseInt(
+          query.limit || query.count || "20",
+          10,
+        );
         const limit = Number.isFinite(parsedLimit)
           ? Math.min(Math.max(parsedLimit, 1), 50)
           : 20;
@@ -1902,18 +1905,10 @@ const app = new Elysia()
         url: t.Optional(t.String()),
         search: t.Optional(t.String()),
         limit: t.Optional(t.String()),
+        count: t.Optional(t.String()),
       }),
     },
   )
-  .get("/pin/stats", () => getCacheStats())
-  .post("/pin/cache/clear", () => {
-    clearCaches();
-
-    return {
-      status: "success",
-      message: "Pinterest cache cleared",
-    };
-  })
   .get(
     "/instav2",
     async ({ query }) => {
