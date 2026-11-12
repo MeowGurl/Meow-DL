@@ -1813,7 +1813,8 @@ const app = new Elysia()
       const model = query.model || "gemini-auto";
       const uid = query.uid ? String(query.uid).trim() : undefined;
       const system = query.system ? String(query.system).trim() : undefined;
-      const result = await geminiHandler(prompt, model, uid, system);
+      const media = query.media || query.image || undefined;
+      const result = await geminiHandler(prompt, model, uid, system, media);
       if (result.status === "fetch_error") {
         set.status = 502;
       }
@@ -1825,6 +1826,8 @@ const app = new Elysia()
         model: t.Optional(t.String()),
         uid: t.Optional(t.String()),
         system: t.Optional(t.String()),
+        media: t.Optional(t.String()),
+        image: t.Optional(t.String()),
       }),
     },
   )
@@ -1835,7 +1838,8 @@ const app = new Elysia()
       const model = body?.model || "gemini-auto";
       const uid = body?.uid ? String(body.uid).trim() : undefined;
       const system = body?.system ? String(body.system).trim() : undefined;
-      const result = await geminiHandler(prompt, model, uid, system);
+      const media = body?.media || body?.image || undefined;
+      const result = await geminiHandler(prompt, model, uid, system, media);
       if (result.status === "fetch_error") {
         set.status = 502;
       }
@@ -1848,6 +1852,8 @@ const app = new Elysia()
           model: t.Optional(t.String()),
           uid: t.Optional(t.String()),
           system: t.Optional(t.String()),
+          media: t.Optional(t.Union([t.String(), t.Array(t.String())])),
+          image: t.Optional(t.Union([t.String(), t.Array(t.String())])),
         }),
       ),
     },
