@@ -1,7 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
 
 export type ModelInfo = {
   id: string;
@@ -51,7 +50,6 @@ export type GeminiResult =
       prompt: string;
       response: string;
       images?: string[];
-      authenticated?: boolean;
       uid?: string;
       turn?: number;
       system?: string;
@@ -64,7 +62,6 @@ export type GeminiResult =
       status: "fetch_error" | "invalid_prompt";
       model: string;
       prompt: string;
-      authenticated?: boolean;
       uid?: string;
       error: string;
       timings: {
@@ -97,44 +94,42 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 const UPLOAD_URL = "https://content-push.googleapis.com/upload/";
-const ROTATE_COOKIES_URL = "https://accounts.google.com/RotateCookies";
 const DEFAULT_PUSH_ID = "feeds/mcudyrk2a4khkz";
 
 const userSessions = new Map<string, SessionContext>();
 const MAX_SESSIONS = 5000;
 const SESSION_TTL = 2 * 60 * 60 * 1000;
 
-let cachedCookieHeader: string | null = null;
 let cachedAtToken: string | null = null;
 let cachedBuildLabel: string | null = null;
 let cachedPushId: string = DEFAULT_PUSH_ID;
 let tokenExpiresAt = 0;
 
-function resolveModel(input?: string): { id: string; mode: number; expandedThinking: boolean } {
-  if (!input) return { id: "gemini-auto", mode: 4, expandedThinking: false };
+function resolveModel(input?: string): string {
+  if (!input) return "gemini-auto";
   const normalized = input.trim().toLowerCase();
-  const map: Record<string, { id: string; mode: number; expandedThinking: boolean }> = {
-    auto: { id: "gemini-auto", mode: 4, expandedThinking: false },
-    "gemini-auto": { id: "gemini-auto", mode: 4, expandedThinking: false },
-    flash: { id: "gemini-flash", mode: 1, expandedThinking: false },
-    "gemini-flash": { id: "gemini-flash", mode: 1, expandedThinking: false },
-    pro: { id: "gemini-pro", mode: 3, expandedThinking: false },
-    "gemini-pro": { id: "gemini-pro", mode: 3, expandedThinking: false },
-    thinking: { id: "gemini-flash-thinking", mode: 2, expandedThinking: true },
-    "flash-thinking": { id: "gemini-flash-thinking", mode: 2, expandedThinking: true },
-    "gemini-flash-thinking": { id: "gemini-flash-thinking", mode: 2, expandedThinking: true },
-    advanced: { id: "gemini-advanced", mode: 3, expandedThinking: false },
-    "gemini-advanced": { id: "gemini-advanced", mode: 3, expandedThinking: false },
-    ultra: { id: "gemini-advanced", mode: 3, expandedThinking: false },
-    "gemini-ultra": { id: "gemini-advanced", mode: 3, expandedThinking: false },
+  const map: Record<string, string> = {
+    auto: "gemini-auto",
+    "gemini-auto": "gemini-auto",
+    flash: "gemini-flash",
+    "gemini-flash": "gemini-flash",
+    pro: "gemini-pro",
+    "gemini-pro": "gemini-pro",
+    thinking: "gemini-flash-thinking",
+    "flash-thinking": "gemini-flash-thinking",
+    "gemini-flash-thinking": "gemini-flash-thinking",
+    advanced: "gemini-advanced",
+    "gemini-advanced": "gemini-advanced",
+    ultra: "gemini-advanced",
+    "gemini-ultra": "gemini-advanced",
   };
-  return map[normalized] || { id: "gemini-auto", mode: 4, expandedThinking: false };
+  return map[normalized] || "gemini-auto";
 }
 
-function parseCookieMap(raw: string): Map<string, string> {
+function parseCookieContent(raw: string): string {
   const trimmed = raw.trim();
+  if (!trimmed) return "";
   const map = new Map<string, string>();
-  if (!trimmed) return map;
 
   if (trimmed.includes("\t") || trimmed.startsWith("#")) {
     const lines = trimmed.split(/\r?\n/);
@@ -160,81 +155,21 @@ function parseCookieMap(raw: string): Map<string, string> {
       }
     }
   }
-  return map;
-}
 
-function serializeCookieMap(map: Map<string, string>): string {
   return Array.from(map.entries())
     .map(([k, v]) => `${k}=${v}`)
     .join("; ");
 }
 
-function makeSapisidHash(cookie: string): string | null {
-  const map = parseCookieMap(cookie);
-  const sapisid = map.get("SAPISID") || map.get("__Secure-1PAPISID");
-  if (!sapisid) return null;
-  const ts = Math.floor(Date.now() / 1000);
-  const digest = createHash("sha1")
-    .update(`${ts} ${sapisid} https://gemini.google.com`)
-    .digest("hex");
-  return `SAPISIDHASH ${ts}_${digest}`;
-}
-
 async function getGeminiCookies(): Promise<string | null> {
-  if (cachedCookieHeader) return cachedCookieHeader;
-  if (process.env.GEMINI_COOKIE?.trim()) {
-    const parsed = serializeCookieMap(parseCookieMap(process.env.GEMINI_COOKIE));
-    if (parsed) {
-      cachedCookieHeader = parsed;
-      return parsed;
-    }
-  }
   for (const path of COOKIE_FILE_PATHS) {
     try {
       const content = await readFile(path, "utf-8");
-      const parsed = serializeCookieMap(parseCookieMap(content));
-      if (parsed) {
-        cachedCookieHeader = parsed;
-        return parsed;
-      }
+      const parsed = parseCookieContent(content);
+      if (parsed) return parsed;
     } catch {}
   }
   return null;
-}
-
-async function rotateCookies(cookie: string): Promise<string> {
-  try {
-    const res = await fetch(ROTATE_COOKIES_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
-        Cookie: cookie,
-      },
-      body: '[000,"-0000000000000000000"]',
-    });
-    if (!res.ok) return cookie;
-    const setCookies =
-      typeof (res.headers as any).getSetCookie === "function"
-        ? (res.headers as any).getSetCookie()
-        : [];
-    if (Array.isArray(setCookies) && setCookies.length > 0) {
-      const map = parseCookieMap(cookie);
-      for (const sc of setCookies) {
-        const pair = String(sc).split(";")[0];
-        const eq = pair.indexOf("=");
-        if (eq > 0) {
-          const k = pair.slice(0, eq).trim();
-          const v = pair.slice(eq + 1).trim();
-          if (k && v) map.set(k, v);
-        }
-      }
-      const updated = serializeCookieMap(map);
-      cachedCookieHeader = updated;
-      return updated;
-    }
-  } catch {}
-  return cookie;
 }
 
 async function getDefaultSystemInstruction(): Promise<string | null> {
@@ -250,94 +185,68 @@ async function getDefaultSystemInstruction(): Promise<string | null> {
   return null;
 }
 
-async function tryExtractSessionTokens(
-  cookie: string,
-  forceRefresh = false,
-): Promise<{
+async function tryExtractSessionTokens(cookie: string): Promise<{
   at: string | null;
   bl: string | null;
   pushId: string;
-  cookie: string;
 }> {
-  if (!forceRefresh && cachedAtToken && Date.now() < tokenExpiresAt) {
-    return {
-      at: cachedAtToken,
-      bl: cachedBuildLabel,
-      pushId: cachedPushId,
-      cookie,
-    };
+  if (cachedAtToken && Date.now() < tokenExpiresAt) {
+    return { at: cachedAtToken, bl: cachedBuildLabel, pushId: cachedPushId };
   }
 
-  let activeCookie = cookie;
   const candidateUrls = [
     "https://gemini.google.com/app",
     "https://gemini.google.com/u/0/app",
     "https://gemini.google.com/u/1/app",
   ];
 
-  const extractFromUrls = async (c: string) => {
-    for (const url of candidateUrls) {
-      try {
-        const response = await fetch(url, {
-          headers: {
-            "User-Agent": USER_AGENT,
-            Cookie: c,
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-          },
-          redirect: "follow",
-        });
+  for (const url of candidateUrls) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          Cookie: cookie,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin",
+        },
+      });
 
-        if (!response.ok) continue;
+      if (!response.ok) continue;
 
-        const html = await response.text();
-        const atMatch =
-          html.match(/"SNlM0e":"([^"]+)"/) ||
-          html.match(/SNlM0e(?:\\?"|"):\\?"(.*?)(?:\\?"|")/) ||
-          html.match(/\["SNlM0e",\s*(?:\[\],)?\s*\["([^"]+)"\]/) ||
-          html.match(/["']SNlM0e["'],\s*(?:\[\],)?\s*["']([^"']+)["']/);
+      const html = await response.text();
+      const atMatch =
+        html.match(/"SNlM0e":"([^"]+)"/) ||
+        html.match(/\["SNlM0e",\s*(?:\[\],)?\s*\["([^"]+)"\]/) ||
+        html.match(/["']SNlM0e["'],\s*(?:\[\],)?\s*["']([^"']+)["']/);
 
-        const blMatch =
-          html.match(/"cfb2h":"([^"]+)"/) ||
-          html.match(/"bl":"([^"]+)"/) ||
-          html.match(/boq_assistant-bard-web-server_[0-9a-zA-Z._-]+/);
+      const blMatch =
+        html.match(/"cfb2h":"([^"]+)"/) ||
+        html.match(/"bl":"([^"]+)"/) ||
+        html.match(/boq_assistant-bard-web-server_[0-9a-zA-Z._-]+/);
 
-        const pushIdMatch = html.match(/qKIAYe(?:\\?"|"):\\?"(.*?)(?:\\?"|")/);
+      const pushIdMatch = html.match(/qKIAYe(?:\\?"|"):\\?"(.*?)(?:\\?"|")/);
 
-        if (atMatch?.[1]) {
-          cachedAtToken = atMatch[1];
-          tokenExpiresAt = Date.now() + 20 * 60 * 1000;
-        }
-        if (blMatch) {
-          cachedBuildLabel =
-            typeof blMatch === "string" ? blMatch : blMatch[1] || blMatch[0];
-        }
-        if (pushIdMatch?.[1]) {
-          cachedPushId = pushIdMatch[1];
-        }
+      if (atMatch?.[1]) {
+        cachedAtToken = atMatch[1];
+        tokenExpiresAt = Date.now() + 30 * 60 * 1000;
+      }
+      if (blMatch) {
+        cachedBuildLabel =
+          typeof blMatch === "string" ? blMatch : blMatch[1] || blMatch[0];
+      }
+      if (pushIdMatch?.[1]) {
+        cachedPushId = pushIdMatch[1];
+      }
 
-        if (cachedAtToken) return true;
-      } catch {}
-    }
-    return false;
-  };
-
-  let found = await extractFromUrls(activeCookie);
-  if (!found) {
-    activeCookie = await rotateCookies(activeCookie);
-    found = await extractFromUrls(activeCookie);
+      if (cachedAtToken) break;
+    } catch {}
   }
 
-  return {
-    at: cachedAtToken,
-    bl: cachedBuildLabel,
-    pushId: cachedPushId,
-    cookie: activeCookie,
-  };
+  return { at: cachedAtToken, bl: cachedBuildLabel, pushId: cachedPushId };
 }
 
 function inferFilenameFromMime(mime: string, fallbackUrl?: string): string {
@@ -615,7 +524,7 @@ export async function askGemini(
   system?: string,
   media?: string | string[],
 ): Promise<GeminiResult> {
-  const resolvedModel = resolveModel(model);
+  const resolvedTargetModel = resolveModel(model);
   const cleanUid = uid ? String(uid).trim() : undefined;
   const inputSystem = system ? String(system).trim() : undefined;
 
@@ -649,7 +558,7 @@ export async function askGemini(
     userSessions.delete(cleanUid);
     return {
       status: "success",
-      model: resolvedModel.id,
+      model: resolvedTargetModel,
       prompt: trimmedPrompt,
       response: `Chat history cleared for uid: ${cleanUid}`,
       uid: cleanUid,
@@ -661,18 +570,15 @@ export async function askGemini(
   const totalStartTime = performance.now();
   const timings = { fetchTime: 0, totalTime: 0 };
 
-  let cookie = await getGeminiCookies();
-  let sessionTokens = cookie
+  const cookie = await getGeminiCookies();
+  const { at, bl, pushId } = cookie
     ? await tryExtractSessionTokens(cookie)
-    : { at: null, bl: null, pushId: DEFAULT_PUSH_ID, cookie: "" };
-  if (cookie && sessionTokens.cookie) {
-    cookie = sessionTokens.cookie;
-  }
+    : { at: null, bl: null, pushId: DEFAULT_PUSH_ID };
 
   const uploadedRefs: Array<[[string, number], string]> = [];
   if (mediaInputs.length > 0) {
     const uploadResults = await Promise.all(
-      mediaInputs.map((m) => uploadMediaToGemini(m, cookie, sessionTokens.pushId)),
+      mediaInputs.map((m) => uploadMediaToGemini(m, cookie, pushId)),
     );
     for (const ref of uploadResults) {
       if (ref) {
@@ -683,15 +589,16 @@ export async function askGemini(
       timings.totalTime = performance.now() - totalStartTime;
       return {
         status: "fetch_error",
-        model: resolvedModel.id,
+        model: resolvedTargetModel,
         prompt: trimmedPrompt,
-        authenticated: Boolean(sessionTokens.at),
         uid: cleanUid,
         error: "Failed to upload media attachment to Gemini.",
         timings,
       };
     }
   }
+
+  const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
 
   let conversationId = "";
   let responseId = "";
@@ -724,14 +631,8 @@ export async function askGemini(
     }
   }
 
-  const buildRequestPayload = (
-    atToken: string | null,
-    blLabel: string | null,
-  ) => {
-    const reqId = Math.floor(Math.random() * 900000 + 100000).toString();
-    const requestUuid = randomUUID().toUpperCase();
-    const inner: any[] = new Array(97).fill(null);
-    inner[0] = [
+  const messageStruct = [
+    [
       finalPrompt,
       0,
       null,
@@ -739,123 +640,67 @@ export async function askGemini(
       null,
       null,
       0,
-    ];
-    inner[1] = ["en"];
-    inner[2] = [
-      conversationId,
-      responseId,
-      choiceId,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      "",
-    ];
-    inner[6] = [1];
-    inner[7] = 1;
-    inner[10] = 1;
-    inner[11] = 0;
-    inner[17] = [[currentTurn - 1]];
-    inner[18] = 0;
-    inner[27] = 1;
-    inner[30] = [4];
-    inner[41] = [1];
-    inner[53] = 0;
-    inner[59] = requestUuid;
-    inner[61] = [];
-    inner[68] = 2;
-    inner[79] = resolvedModel.mode;
-    inner[80] = resolvedModel.expandedThinking ? 2 : 1;
-    inner[91] = 0;
-    inner[96] = conversationId ? 0 : 1;
+    ],
+    ["en"],
+    [conversationId, responseId, choiceId, null, null, []],
+    null,
+    null,
+    null,
+    [1],
+    0,
+    [],
+    [],
+    1,
+    0,
+  ];
+  const fReq = JSON.stringify([null, JSON.stringify(messageStruct)]);
 
-    const fReq = JSON.stringify([null, JSON.stringify(inner)]);
-    const queryParams = new URLSearchParams({
-      _reqid: reqId,
-      hl: "en",
-      rt: "c",
-    });
-    if (blLabel) {
-      queryParams.set("bl", blLabel);
-    }
+  const queryParams = new URLSearchParams({
+    _reqid: reqId,
+    rt: "c",
+  });
+  if (bl) {
+    queryParams.set("bl", bl);
+  }
 
-    const bodyParams = new URLSearchParams();
-    bodyParams.set("f.req", fReq);
-    if (atToken) {
-      bodyParams.set("at", atToken);
-    }
+  const bodyParams = new URLSearchParams();
+  bodyParams.set("f.req", fReq);
+  if (at) {
+    bodyParams.set("at", at);
+  }
 
-    return {
-      rpcUrl: `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${queryParams.toString()}`,
-      body: bodyParams.toString(),
-      requestUuid,
-    };
+  const rpcUrl = `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${queryParams.toString()}`;
+
+  const requestHeaders: Record<string, string> = {
+    "User-Agent": USER_AGENT,
+    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    Origin: "https://gemini.google.com",
+    Referer: "https://gemini.google.com/",
+    "X-Same-Domain": "1",
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
   };
 
-  const buildHeaders = (activeCookie: string | null, requestUuid: string) => {
-    const headers: Record<string, string> = {
-      "User-Agent": USER_AGENT,
-      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-      Origin: "https://gemini.google.com",
-      Referer: "https://gemini.google.com/app",
-      "X-Same-Domain": "1",
-      Accept: "*/*",
-      "Accept-Language": "en-US,en;q=0.9",
-      "x-goog-ext-525005358-jspb": `["${requestUuid}",1]`,
-    };
-    if (activeCookie) {
-      headers["Cookie"] = activeCookie;
-      const sapisidHash = makeSapisidHash(activeCookie);
-      if (sapisidHash) {
-        headers["Authorization"] = sapisidHash;
-      }
-    }
-    return headers;
-  };
+  if (cookie) {
+    requestHeaders["Cookie"] = cookie;
+  }
 
   const fetchStartTime = performance.now();
 
   try {
-    let usedAuthenticated = Boolean(cookie && sessionTokens.at);
-    let reqData = buildRequestPayload(
-      usedAuthenticated ? sessionTokens.at : null,
-      sessionTokens.bl,
-    );
-    let response = await fetch(reqData.rpcUrl, {
+    let response = await fetch(rpcUrl, {
       method: "POST",
-      headers: buildHeaders(
-        usedAuthenticated ? cookie : null,
-        reqData.requestUuid,
-      ),
-      body: reqData.body,
+      headers: requestHeaders,
+      body: bodyParams.toString(),
     });
 
-    if (!response.ok && cookie) {
-      cachedAtToken = null;
-      tokenExpiresAt = 0;
-      const refreshed = await tryExtractSessionTokens(cookie, true);
-      if (refreshed.at) {
-        cookie = refreshed.cookie;
-        sessionTokens = refreshed;
-        usedAuthenticated = true;
-        reqData = buildRequestPayload(refreshed.at, refreshed.bl);
-        response = await fetch(reqData.rpcUrl, {
-          method: "POST",
-          headers: buildHeaders(cookie, reqData.requestUuid),
-          body: reqData.body,
-        });
-      }
-    }
-
     if (!response.ok && cookie && uploadedRefs.length === 0) {
-      usedAuthenticated = false;
-      reqData = buildRequestPayload(null, sessionTokens.bl);
-      response = await fetch(reqData.rpcUrl, {
+      delete requestHeaders["Cookie"];
+      bodyParams.delete("at");
+      response = await fetch(rpcUrl, {
         method: "POST",
-        headers: buildHeaders(null, reqData.requestUuid),
-        body: reqData.body,
+        headers: requestHeaders,
+        body: bodyParams.toString(),
       });
     }
 
@@ -865,9 +710,8 @@ export async function askGemini(
       timings.totalTime = performance.now() - totalStartTime;
       return {
         status: "fetch_error",
-        model: resolvedModel.id,
+        model: resolvedTargetModel,
         prompt: trimmedPrompt,
-        authenticated: usedAuthenticated,
         uid: cleanUid,
         error: `Gemini Web RPC returned HTTP ${response.status}`,
         timings,
@@ -882,9 +726,8 @@ export async function askGemini(
     if (!streamResult.text && streamResult.images.length === 0) {
       return {
         status: "fetch_error",
-        model: resolvedModel.id,
+        model: resolvedTargetModel,
         prompt: trimmedPrompt,
-        authenticated: usedAuthenticated,
         uid: cleanUid,
         error: "Empty or unparseable response from Gemini Web.",
         timings,
@@ -908,11 +751,10 @@ export async function askGemini(
 
     return {
       status: "success",
-      model: resolvedModel.id,
+      model: resolvedTargetModel,
       prompt: trimmedPrompt,
       response: streamResult.text,
       ...(streamResult.images.length > 0 ? { images: streamResult.images } : {}),
-      authenticated: usedAuthenticated,
       uid: cleanUid,
       turn: cleanUid ? currentTurn : undefined,
       system: activeSystem,
@@ -922,7 +764,7 @@ export async function askGemini(
     timings.totalTime = performance.now() - totalStartTime;
     return {
       status: "fetch_error",
-      model: resolvedModel.id,
+      model: resolvedTargetModel,
       prompt: trimmedPrompt,
       uid: cleanUid,
       error:
