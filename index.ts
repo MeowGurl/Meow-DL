@@ -32,7 +32,8 @@ import {
   reloadCookies,
   isDead,
   listModels,
-
+  createImageTunnel,
+  streamImageTunnel,
   type Mode,
 } from "./api/gemini";
 import instav2Handler from "./api/instav2";
@@ -1987,76 +1988,63 @@ performance.now() - startTime
 },
 )
 .get(
-"/g",
-async ({ query, set }) => {
+  "/g",
+  async ({ query, request, set }) => {
+    const prompt = query.prompt;
+    const mode = (query.mode as Mode) || "balanced";
 
-const prompt = query.prompt;
+    if (!prompt) {
+      return {
+        status: "info",
+        message: "Provide ?prompt=...",
+        models: listModels(),
+      };
+    }
 
-const mode = (query.mode as Mode) || "balanced";
+    if (isDead()) {
+      set.status = 503;
+      return {
+        status: "error",
+        message: "Cookies are dead. Replace api/gemini_cookies.json and call /g/reload.",
+      };
+    }
 
-const uid = query.uid;
+    const result =
+      mode === "deep_research"
+        ? await deepResearch(prompt, query.uid)
+        : await generate({ prompt, uid: query.uid, mode, model: query.model, system: query.system });
 
-const system = query.system;
+    if ("error" in result) {
+      set.status = 502;
+      return { status: "fetch_error", error: result.error };
+    }
 
-if (!prompt) {
-  return {
-    status: "info",
-    message: "Provide ?prompt=...",
-    models: listModels(),
-  };
-}
+    const requestUrl = new URL(request.url);
+    const protocol = request.headers.get("x-forwarded-proto") || requestUrl.protocol.replace(":", "");
+    const baseUrl = `${protocol}://${requestUrl.host}`;
 
-if (isDead()) {
-  set.status = 503;
-  return {
-    status: "error",
-    message:
-    "Cookies are dead. Replace api/gemini_cookies.json and call /g/reload.",
-  };
-}
-
-const result =
-mode === "deep_research"
-? await deepResearch(prompt, uid)
-: await generate({ prompt, uid, mode, system });
-
-if ("error" in result) {
-  set.status = 502;
-  return { status: "fetch_error", error: result.error };
-}
-
-return {
-  status: "success",
-  mode,
-  response: result.text,
-  thoughts: result.thoughts,
-  images: result.images,
-  videos: result.videos,
-  audio: result.audio,
-  conversationId: result.conversationId,
-  responseId: result.responseId,
-};
-},
-{
-  query: t.Object({
-    prompt: t.Optional(t.String()),
-    mode: t.Optional(t.String()),
-    uid: t.Optional(t.String()),
-    system: t.Optional(t.String()),
-  }),
-},
+    return {
+      status: "success",
+      mode,
+      response: result.text,
+      thoughts: result.thoughts,
+      images: result.images.map((url) => `${baseUrl}/tunnel/${createImageTunnel(url)}`),
+      videos: result.videos,
+      audio: result.audio,
+      conversationId: result.conversationId,
+      responseId: result.responseId,
+    };
+  },
+  {
+    query: t.Object({
+      prompt: t.Optional(t.String()),
+      mode: t.Optional(t.String()),
+      model: t.Optional(t.String()),
+      uid: t.Optional(t.String()),
+      system: t.Optional(t.String()),
+    }),
+  },
 )
-.get("/g/reload", async ({ set }) => {
-
-const result = await reloadCookies();
-
-if (!result.ok) {
-  set.status = 503;
-  return { status: "error", reason: result.reason };
-}
-
-return { status: "ok" };
-})
 .get(
 "/pin",
 async ({ query, request, set }) => {
