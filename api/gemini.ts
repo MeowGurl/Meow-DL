@@ -59,6 +59,11 @@ interface StoredSession extends SessionState {
   history: ChatTurn[];
 }
 
+interface ImageTunnel {
+  url: string;
+  expiresAt: number;
+}
+
 export type Mode =
   | "balanced"
   | "fast"
@@ -99,6 +104,9 @@ const MAX_SESSIONS = 1000;
 const TOKEN_TTL = 10 * 60 * 1000;
 const REFRESH_INTERVAL = 8 * 60 * 1000;
 const HEALTH_CHECK_INTERVAL = 3 * 60 * 1000;
+const IMAGE_TUNNEL_TTL = 5 * 60 * 60 * 1000;
+const MAX_IMAGE_TUNNELS = 2000;
+const MAX_REDIRECTS = 6;
 
 const DEFAULT_MODEL_HASH = "56fdd199312815e2";
 const MODEL_HASHES: Record<string, string> = {
@@ -115,7 +123,11 @@ const EMPTY_TOKENS: PageTokens = {
   clientPctx: null,
 };
 
+const IMAGE_PLACEHOLDER = /\n?https?:\/\/googleusercontent\.com\/image_generation_content\/\d+/g;
+const IMAGE_INTENT = /^(generate|create|draw|make|imagine|design|render)\b/i;
+
 const userSessions = new Map<string, StoredSession>();
+const imageTunnels = new Map<string, ImageTunnel>();
 
 let jar: CookieJar = {};
 let tokens: PageTokens = { ...EMPTY_TOKENS };
@@ -400,24 +412,33 @@ async function uploadImage(media: MediaInput): Promise<unknown[] | null> {
   }
 }
 
+function buildPrompt(prompt: string, system: string | undefined, turn: number, mode: Mode): string {
+  const base = mode === "image" && !IMAGE_INTENT.test(prompt.trim()) ? `Generate an image: ${prompt}` : prompt;
+  return system && turn === 1 ? `[SYSTEM INSTRUCTION]\n${system}\n\n[USER]\n${base}` : base;
+}
+
 function buildInnerPayload(opts: {
   prompt: string;
   system?: string;
   mediaRefs: unknown[];
   session: SessionState;
   mode: Mode;
+  requestId: string;
 }): unknown[] {
-  const { prompt, system, mediaRefs, session, mode } = opts;
-
-  const finalPrompt =
-    system && session.turn === 1
-      ? `[SYSTEM INSTRUCTION]\n${system}\n\n[USER]\n${prompt}`
-      : prompt;
+  const { prompt, system, mediaRefs, session, mode, requestId } = opts;
 
   const reasoning = mode === "thinking" || mode === "deep_research" ? 2 : 1;
   const inner: unknown[] = new Array(97).fill(null);
 
-  inner[0] = [finalPrompt, 0, null, mediaRefs.length ? mediaRefs : null, null, null, 0];
+  inner[0] = [
+    buildPrompt(prompt, system, session.turn, mode),
+    0,
+    null,
+    mediaRefs.length ? mediaRefs : null,
+    null,
+    null,
+    0,
+  ];
   inner[1] = ["en"];
   inner[2] = [
     session.conversationId,
@@ -431,6 +452,8 @@ function buildInnerPayload(opts: {
     null,
     "",
   ];
+  inner[3] = "!";
+  inner[4] = requestId.replace(/-/g, "");
   inner[6] = [1];
   inner[7] = 1;
   inner[10] = 1;
@@ -441,7 +464,7 @@ function buildInnerPayload(opts: {
   inner[30] = [4];
   inner[41] = [1];
   inner[53] = 0;
-  inner[59] = randomUUID().toUpperCase();
+  inner[59] = requestId.toUpperCase();
   inner[61] = [];
   inner[68] = 2;
   inner[79] = reasoning;
@@ -464,7 +487,7 @@ function buildStreamUrl(temporary: boolean): string {
   return `${STREAM_URL}?${qp}`;
 }
 
-function buildHeaders(temporary: boolean, modelHash: string): Record<string, string> {
+function buildHeaders(modelHash: string, requestId: string): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
     "User-Agent": USER_AGENT,
@@ -474,30 +497,14 @@ function buildHeaders(temporary: boolean, modelHash: string): Record<string, str
     "X-Same-Domain": "1",
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "x-goog-ext-525001261-jspb": JSON.stringify([
-      temporary ? 1 : 0,
-      1,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      1,
-      modelHash,
-    ]),
+    "x-goog-ext-525001261-jspb": JSON.stringify([1, null, null, null, modelHash, null, null, 0, [4]]),
+    "x-goog-ext-525005358-jspb": JSON.stringify([requestId.toUpperCase(), 1]),
   };
 
   const auth = sapisidHash();
   if (auth) headers.Authorization = auth;
 
   return headers;
-}
-
-function classifyUrl(url: string, out: ClassifiedOutput): void {
-  if (/\.(mp4|webm)/i.test(url) || url.includes("video")) out.videos.push(url);
-  else if (/\.(mp3|wav|m4a)/i.test(url) || url.includes("audio")) out.audio.push(url);
-  else out.images.push(url);
 }
 
 function parseStreamFrames(
@@ -516,40 +523,51 @@ function parseStreamFrames(
   for (const line of raw.split("\n")) {
     if (!line.startsWith("[")) continue;
 
+    let rows: unknown;
     try {
-      const row = JSON.parse(line);
-      const innerStr = Array.isArray(row) && row[0]?.[2];
-      if (!innerStr) continue;
+      rows = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(rows)) continue;
 
-      const data = JSON.parse(innerStr);
+    for (const row of rows) {
+      if (!Array.isArray(row) || row[0] !== "wrb.fr" || typeof row[2] !== "string") continue;
 
-      if (Array.isArray(data[1])) {
-        out.conversationId = data[1][0];
-        out.responseId = data[1][1];
-        if (data[1][2]) out.choiceId = data[1][2];
+      let data: any;
+      try {
+        data = JSON.parse(row[2]);
+      } catch {
+        continue;
       }
 
-      if (Array.isArray(data[4])) {
-        for (const cand of data[4]) {
-          const parts = cand?.[0]?.[0];
-          if (!Array.isArray(parts)) continue;
-
-          for (const part of parts) {
-            if (typeof part === "string") {
-              out.text += part;
-            } else if (Array.isArray(part)) {
-              const url = part[0];
-              if (typeof url === "string" && /^https?:\/\//.test(url)) {
-                classifyUrl(url, out);
-              }
-            }
-          }
-        }
+      if (Array.isArray(data?.[1])) {
+        out.conversationId = data[1][0] ?? out.conversationId;
+        out.responseId = data[1][1] ?? out.responseId;
       }
 
-      if (Array.isArray(data[3])) {
-        for (const t of data[3]) if (typeof t === "string") out.thoughts.push(t);
+      const cand = data?.[4]?.[0];
+      if (!Array.isArray(cand)) continue;
+
+      if (typeof cand[0] === "string") out.choiceId = cand[0];
+      if (typeof cand[1]?.[0] === "string") out.text = cand[1][0].replace(IMAGE_PLACEHOLDER, "").trim();
+
+      const thought = cand[37]?.[0]?.[0];
+      if (typeof thought === "string") out.thoughts = [thought];
+
+      const urls = new Set<string>();
+
+      for (const img of (cand[12]?.[1] ?? []) as any[]) {
+        const u = img?.[0]?.[0]?.[0];
+        if (typeof u === "string") urls.add(u);
       }
+
+      for (const img of (cand[12]?.[7]?.[0] ?? []) as any[]) {
+        const u = img?.[0]?.[3]?.[3];
+        if (typeof u === "string") urls.add(u);
+      }
+
+      if (urls.size) out.images = [...urls];
 
       onChunk?.({
         text: out.text,
@@ -558,7 +576,7 @@ function parseStreamFrames(
         videos: out.videos,
         audio: out.audio,
       });
-    } catch {}
+    }
   }
 
   return out;
@@ -631,6 +649,7 @@ export async function generate(
   const modelHash = (opts.model && MODEL_HASHES[opts.model]) || DEFAULT_MODEL_HASH;
   const mode: Mode = opts.mode ?? "balanced";
   const temporary = opts.temporary ?? false;
+  const requestId = randomUUID();
   const { session, history } = resolveSession(opts.uid);
 
   const mediaRefs: unknown[] = [];
@@ -645,6 +664,7 @@ export async function generate(
     mediaRefs,
     session,
     mode,
+    requestId,
   });
 
   const body = new URLSearchParams();
@@ -655,7 +675,7 @@ export async function generate(
   try {
     res = await fetch(buildStreamUrl(temporary), {
       method: "POST",
-      headers: buildHeaders(temporary, modelHash),
+      headers: buildHeaders(modelHash, requestId),
       body: body.toString(),
       signal: AbortSignal.timeout(180_000),
     });
@@ -678,6 +698,10 @@ export async function generate(
   }
 
   const parsed = parseStreamFrames(raw, opts.onChunk);
+
+  if (!parsed.text && parsed.images.length === 0) {
+    return { error: `Empty reply from Gemini: ${raw.slice(0, 400)}` };
+  }
 
   if (opts.uid) saveSession(opts.uid, session, parsed, opts, history);
 
@@ -736,7 +760,7 @@ export async function deepResearch(
   try {
     startRes = await fetch(`${BATCH_URL}?${query}`, {
       method: "POST",
-      headers: buildHeaders(false, DEFAULT_MODEL_HASH),
+      headers: buildHeaders(DEFAULT_MODEL_HASH, randomUUID()),
       body: startBody.toString(),
       signal: AbortSignal.timeout(60_000),
     });
@@ -758,6 +782,105 @@ export async function deepResearch(
       "Polling finalisation is account- and version-dependent; " +
       "use the conversation ID above to retrieve the final report via a follow-up turn.",
   };
+}
+
+function sweepImageTunnels(): void {
+  const now = Date.now();
+  for (const [id, tunnel] of imageTunnels) {
+    if (tunnel.expiresAt <= now) imageTunnels.delete(id);
+  }
+  while (imageTunnels.size >= MAX_IMAGE_TUNNELS) {
+    const oldest = imageTunnels.keys().next().value;
+    if (!oldest) break;
+    imageTunnels.delete(oldest);
+  }
+}
+
+function isGoogleHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host.endsWith("google.com") || host.endsWith("googleusercontent.com");
+  } catch {
+    return false;
+  }
+}
+
+function withFullSize(url: string): string {
+  const needsSize = url.includes("googleusercontent.com") && !/=[a-z]\d+/i.test(url.split("/").pop() ?? "");
+  return needsSize ? `${url}=s2048` : url;
+}
+
+async function fetchWithCookies(startUrl: string): Promise<Response> {
+  let current = withFullSize(startUrl);
+
+  for (let hop = 0; hop < MAX_REDIRECTS; hop++) {
+    const headers: Record<string, string> = {
+      "User-Agent": USER_AGENT,
+      Referer: `${ORIGIN}/`,
+    };
+    if (isGoogleHost(current)) headers.Cookie = serializeJar(jar);
+
+    const res = await fetch(current, {
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      current = new URL(location, current).toString();
+      continue;
+    }
+
+    return res;
+  }
+
+  throw new Error("Too many redirects while fetching image.");
+}
+
+export function createImageTunnel(url: string): string {
+  sweepImageTunnels();
+  const id = randomUUID();
+  imageTunnels.set(id, { url, expiresAt: Date.now() + IMAGE_TUNNEL_TTL });
+  return id;
+}
+
+export async function streamImageTunnel(id: string): Promise<Response | null> {
+  const tunnel = imageTunnels.get(id);
+  if (!tunnel) return null;
+
+  if (tunnel.expiresAt <= Date.now()) {
+    imageTunnels.delete(id);
+    return null;
+  }
+
+  try {
+    const upstream = await fetchWithCookies(tunnel.url);
+
+    if (!upstream.ok || !upstream.body) {
+      return Response.json(
+        { success: false, error: `Image fetch failed with HTTP ${upstream.status}.` },
+        { status: 502 },
+      );
+    }
+
+    const contentType = upstream.headers.get("content-type") || "image/png";
+    const extension = contentType.includes("jpeg") ? "jpg" : contentType.includes("webp") ? "webp" : "png";
+    const headers = new Headers({
+      "Content-Type": contentType,
+      "Content-Disposition": `inline; filename="gemini-${id.slice(0, 8)}.${extension}"`,
+      "Cache-Control": "private, max-age=3600",
+    });
+    const length = upstream.headers.get("content-length");
+    if (length) headers.set("Content-Length", length);
+
+    return new Response(upstream.body, { headers });
+  } catch (err) {
+    return Response.json(
+      { success: false, error: err instanceof Error ? err.message : "Image fetch failed." },
+      { status: 502 },
+    );
+  }
 }
 
 export async function initialize(): Promise<{ ok: boolean; reason?: string }> {
