@@ -8,7 +8,6 @@ import {
   YT,
   YTNodes,
   ClientType,
-
   type IRawResponse,
 } from "youtubei.js";
 import { BotGuardClient } from "bgutils-js/botguard";
@@ -54,48 +53,24 @@ import {
 } from "./handler/protection";
 import { getSystemStats } from "./handler/system";
 
-let activeOperations = 0;
-
-let activeRequests = 0;
-
-let restartScheduled = false;
-
-let shutdownTimer: ReturnType<typeof setTimeout> | null = null;
-
-let activeJsdomWindow: { close: () => void } | null = null;
-
 const PORT = 3040;
-
 const DOWNLOAD_DIR = join(process.cwd(), "downloads");
-
 const TEMP_DIR_BASE = join(process.cwd(), "temp");
-
 const MAX_CONCURRENT_DOWNLOADS = 16;
-
 const DOWNLOAD_CHUNK_SIZE_MB = 1;
-
 const IDLE_RESTART_DELAY_MS = 5000;
-
 const SEARCH_CACHE_TTL = 5 * 60 * 60 * 1000;
-
 const COOKIE_FILE_PATH = "cookies.txt";
-
 const ADMIN_USER = process.env.USERNAME || "";
-
 const ADMIN_PASS = process.env.PASSWORD || "";
-
 const TUNNEL_LINK_EXPIRATION_HOURS = 5;
-
 const REMUXED_FILE_CACHE_SECONDS = 300;
-
 const PO_REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
 
 type YTInfo = YT.VideoInfo;
-
 type ParsedYTFormat = NonNullable<
-NonNullable<YTInfo["streaming_data"]>["adaptive_formats"]
+  NonNullable<YTInfo["streaming_data"]>["adaptive_formats"]
 >[number];
-
 type YTPlayer = NonNullable<Innertube["session"]["player"]>;
 
 interface MediaInfo {
@@ -153,26 +128,23 @@ interface VideoCacheEntry {
   bestAudioFormat: ParsedYTFormat;
 }
 
-const searchCache = new Map<string, SearchCacheEntry>();
-
-const videoDataCache = new Map<string, VideoCacheEntry>();
-
-const tunnelSessions = new Map<string, TunnelSession>();
-
-const activeDownloads = new Map<string, Promise<FileCacheEntry>>();
-
-const remuxedFileCache = new Map<string, FileCacheEntry>();
-
+let activeOperations = 0;
+let activeRequests = 0;
+let restartScheduled = false;
+let shutdownTimer: ReturnType<typeof setTimeout> | null = null;
+let activeJsdomWindow: { close: () => void } | null = null;
 let innertube: Innertube;
-
 let webPoMinter: WebPoMinter | null = null;
-
 let webPoMinterExpiresAt = 0;
-
 let webPoMinterPromise: Promise<WebPoMinter> | null = null;
 
-async function createWebPoMinter(): Promise<WebPoMinter> {
+const searchCache = new Map<string, SearchCacheEntry>();
+const videoDataCache = new Map<string, VideoCacheEntry>();
+const tunnelSessions = new Map<string, TunnelSession>();
+const activeDownloads = new Map<string, Promise<FileCacheEntry>>();
+const remuxedFileCache = new Map<string, FileCacheEntry>();
 
+async function createWebPoMinter(): Promise<WebPoMinter> {
   const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", {
     url: "https://www.youtube.com/",
     referrer: "https://www.youtube.com/",
@@ -190,12 +162,11 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   if (!pageResponse.ok) {
     dom.window.close();
     throw new Error(
-    `Could not load YouTube for PO token generation: HTTP ${pageResponse.status}`,
+      `Could not load YouTube for PO token generation: HTTP ${pageResponse.status}`,
     );
   }
 
   const pageHtml = await pageResponse.text();
-
   const ytConfig = pageHtml.match(/ytcfg\.set\(({.+?})\);/s)?.[1];
 
   if (!ytConfig) {
@@ -204,7 +175,6 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   }
 
   if (activeJsdomWindow) {
-
     try {
       activeJsdomWindow.close();
     } catch {}
@@ -235,7 +205,7 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   });
 
   const initialAttestationData = pageHtml.match(
-  /window\.ytAtN\(\s*({[\s\S]*?})\s*\)/,
+    /window\.ytAtN\(\s*({[\s\S]*?})\s*\)/,
   );
 
   if (!initialAttestationData) {
@@ -243,7 +213,7 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   }
 
   const initialAttestationDataJson = parseLooseJSON(
-  initialAttestationData[1],
+    initialAttestationData[1],
   ) as { R?: IRawResponse };
 
   const challengeResponse = initialAttestationDataJson.R;
@@ -253,22 +223,22 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   }
 
   const interpreterPath =
-  challengeResponse.bgChallenge.interpreterUrl
-  .privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
+    challengeResponse.bgChallenge.interpreterUrl
+      .privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
 
   if (!interpreterPath) {
     throw new Error("BotGuard interpreter URL is unavailable");
   }
 
   const interpreterUrl = interpreterPath.startsWith("http")
-  ? interpreterPath
-  : `https:${interpreterPath}`;
+    ? interpreterPath
+    : `https:${interpreterPath}`;
 
   const bgScriptResponse = await fetch(interpreterUrl);
 
   if (!bgScriptResponse.ok) {
     throw new Error(
-    `Could not load BotGuard VM: HTTP ${bgScriptResponse.status}`,
+      `Could not load BotGuard VM: HTTP ${bgScriptResponse.status}`,
     );
   }
 
@@ -287,7 +257,6 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   });
 
   const webPoSignalOutput: WebPoSignalOutput = [];
-
   const botguardResponse = await botGuardClient.snapshot({
     webPoSignalOutput,
   });
@@ -300,22 +269,22 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
 
   if (!integrityTokenResponse.ok) {
     throw new Error(
-    `Could not generate integrity token: HTTP ${integrityTokenResponse.status}`,
+      `Could not generate integrity token: HTTP ${integrityTokenResponse.status}`,
     );
   }
 
   const integrityTokenJson = (await integrityTokenResponse.json()) as [
-  string,
-  number,
-  number,
-  string,
+    string,
+    number,
+    number,
+    string,
   ];
 
   const [
-  integrityToken,
-  estimatedTtlSecs,
-  mintRefreshThreshold,
-  websafeFallbackToken,
+    integrityToken,
+    estimatedTtlSecs,
+    mintRefreshThreshold,
+    websafeFallbackToken,
   ] = integrityTokenJson;
 
   if (!integrityToken) {
@@ -323,21 +292,21 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
   }
 
   const minter = await WebPoMinter.create(
-  {
-    integrityToken,
-    estimatedTtlSecs,
-    mintRefreshThreshold,
-    websafeFallbackToken,
-  },
-  webPoSignalOutput,
+    {
+      integrityToken,
+      estimatedTtlSecs,
+      mintRefreshThreshold,
+      websafeFallbackToken,
+    },
+    webPoSignalOutput,
   );
 
   const refreshAfter = Math.max(
-  60,
-  Math.min(
-  estimatedTtlSecs - 60,
-  mintRefreshThreshold > 0 ? mintRefreshThreshold : estimatedTtlSecs - 300,
-  ),
+    60,
+    Math.min(
+      estimatedTtlSecs - 60,
+      mintRefreshThreshold > 0 ? mintRefreshThreshold : estimatedTtlSecs - 300,
+    ),
   );
 
   webPoMinterExpiresAt = Date.now() + refreshAfter * 1000;
@@ -345,7 +314,6 @@ async function createWebPoMinter(): Promise<WebPoMinter> {
 }
 
 async function getWebPoMinter(forceRefresh = false): Promise<WebPoMinter> {
-
   if (!forceRefresh && webPoMinter && Date.now() < webPoMinterExpiresAt) {
     return webPoMinter;
   }
@@ -361,26 +329,23 @@ async function getWebPoMinter(forceRefresh = false): Promise<WebPoMinter> {
     webPoMinter = await promise;
     return webPoMinter;
   } finally {
-
-  if (webPoMinterPromise === promise) {
-    webPoMinterPromise = null;
+    if (webPoMinterPromise === promise) {
+      webPoMinterPromise = null;
+    }
   }
-}
 }
 
 async function mintContentPoToken(videoId: string): Promise<string> {
-
   try {
     return await (await getWebPoMinter()).mintAsWebsafeString(videoId);
   } catch {
-  webPoMinter = null;
-  webPoMinterExpiresAt = 0;
-  return (await getWebPoMinter(true)).mintAsWebsafeString(videoId);
-}
+    webPoMinter = null;
+    webPoMinterExpiresAt = 0;
+    return (await getWebPoMinter(true)).mintAsWebsafeString(videoId);
+  }
 }
 
 function addPoToken(url: string, poToken: string): string {
-
   if (!url) {
     throw new Error("Selected format has no downloadable URL");
   }
@@ -395,62 +360,52 @@ function hasDownloadableUrl(format: ParsedYTFormat): boolean {
 }
 
 function getClientId(request: Request): string {
-
   const forwarded = request.headers.get("x-forwarded-for");
-
   const realIp = request.headers.get("x-real-ip");
-
   const cfConnecting = request.headers.get("cf-connecting-ip");
 
   return forwarded?.split(",")[0].trim() || realIp || cfConnecting || "unknown";
 }
 
 function getVideoId(url: string): string | null {
-
   try {
-
     const urlObj = new URL(url);
-
     const host = urlObj.hostname.toLowerCase();
 
     if (host === "youtu.be" || host.endsWith(".youtu.be")) {
-
       const id = urlObj.pathname.split("/").filter(Boolean)[0];
       return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
     }
 
     if (
-    host === "youtube.com" ||
-    host.endsWith(".youtube.com") ||
-    host === "youtube-nocookie.com" ||
-    host.endsWith(".youtube-nocookie.com")
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com") ||
+      host === "youtube-nocookie.com" ||
+      host.endsWith(".youtube-nocookie.com")
     ) {
-
       if (urlObj.pathname === "/watch") {
-
         const id = urlObj.searchParams.get("v");
         return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
       }
 
       const match = urlObj.pathname.match(
-      /^\/(?:shorts|live|embed|v)\/([a-zA-Z0-9_-]{11})/,
+        /^\/(?:shorts|live|embed|v)\/([a-zA-Z0-9_-]{11})/,
       );
       return match?.[1] ?? null;
     }
   } catch (error) {
-  console.warn(`Failed to parse video ID from URL: ${url}`, error);
-}
+    console.warn(`Failed to parse video ID from URL: ${url}`, error);
+  }
 
-return null;
+  return null;
 }
 
 async function getCookieFileContent(cookieFilePath: string): Promise<string> {
-
   const cookieFile = Bun.file(cookieFilePath);
 
   if (!(await cookieFile.exists())) {
     console.warn(
-    `Cookie file not found at "${cookieFilePath}". Running unauthenticated.`,
+      `Cookie file not found at "${cookieFilePath}". Running unauthenticated.`,
     );
     return "";
   }
@@ -459,14 +414,13 @@ async function getCookieFileContent(cookieFilePath: string): Promise<string> {
 }
 
 function sanitizeFilename(name: string): string {
-
   let clean = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
 
   clean = clean
-  .replace(/[^\x20-\x7E]/g, "")
-  .replace(/[\\/:*?"<>|#!]/g, "_")
-  .replace(/\s+/g, " ")
-  .trim();
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[\\/:*?"<>|#!]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (clean.length > 200) {
     clean = clean.slice(0, 200);
@@ -476,7 +430,6 @@ function sanitizeFilename(name: string): string {
 }
 
 function formatBytes(bytes: number | undefined, decimals = 2): string {
-
   if (bytes === undefined || bytes === null || !Number.isFinite(bytes)) {
     return "N/A";
   }
@@ -486,19 +439,17 @@ function formatBytes(bytes: number | undefined, decimals = 2): string {
   }
 
   const units = ["Bytes", "KiB", "MiB", "GiB", "TiB"];
-
   const index = Math.min(
-  Math.floor(Math.log(bytes) / Math.log(1024)),
-  units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
   );
 
   return `${parseFloat(
-  (bytes / Math.pow(1024, index)).toFixed(decimals),
+    (bytes / Math.pow(1024, index)).toFixed(decimals),
   )} ${units[index]}`;
 }
 
 function formatDuration(seconds: number): string {
-
   const totalSeconds = Math.max(0, Math.floor(seconds));
 
   if (totalSeconds < 3600) {
@@ -506,7 +457,6 @@ function formatDuration(seconds: number): string {
   }
 
   const hours = Math.floor(totalSeconds / 3600);
-
   const minutes = Math.round((totalSeconds % 3600) / 60);
 
   if (minutes === 0) {
@@ -517,16 +467,13 @@ function formatDuration(seconds: number): string {
 }
 
 function createContentDisposition(filename: string): string {
-
   const asciiFilename = filename.replace(/[^ -~]/g, "_");
-
   const encodedFilename = encodeURIComponent(filename);
 
   return `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodedFilename}`;
 }
 
 function getFormatContentLength(format: ParsedYTFormat): number {
-
   const value = format.content_length;
 
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -534,7 +481,6 @@ function getFormatContentLength(format: ParsedYTFormat): number {
   }
 
   if (typeof value === "string") {
-
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : 0;
   }
@@ -543,9 +489,7 @@ function getFormatContentLength(format: ParsedYTFormat): number {
 }
 
 function getFormatExtension(format: ParsedYTFormat, fallback: string): string {
-
   const mimeType = format.mime_type || "";
-
   const match = mimeType.match(/\/([a-zA-Z0-9]+)/);
 
   if (!match) {
@@ -566,24 +510,21 @@ function getFormatExtension(format: ParsedYTFormat, fallback: string): string {
 }
 
 function createDownloadTasks(
-format: ParsedYTFormat,
-description: string,
+  format: ParsedYTFormat,
+  description: string,
 ): DownloadTask[] {
-
   const contentLength = getFormatContentLength(format);
 
   if (contentLength <= 0) {
     throw new Error(
-    `Missing or invalid content length for ${description.toLowerCase()}.`,
+      `Missing or invalid content length for ${description.toLowerCase()}.`,
     );
   }
 
   const chunkSize = DOWNLOAD_CHUNK_SIZE_MB * 1024 * 1024;
-
   const tasks: DownloadTask[] = [];
 
   for (let index = 0, start = 0; start < contentLength; index++) {
-
     const end = Math.min(start + chunkSize - 1, contentLength - 1);
 
     tasks.push({
@@ -603,22 +544,21 @@ description: string,
 
 function getVideoFormats(info: YTInfo): ParsedYTFormat[] {
   return (info.streaming_data?.adaptive_formats || []).filter(
-  (format) =>
-  format.has_video && !format.has_audio && hasDownloadableUrl(format),
+    (format) =>
+      format.has_video && !format.has_audio && hasDownloadableUrl(format),
   );
 }
 
 function getAudioFormats(info: YTInfo): ParsedYTFormat[] {
   return (info.streaming_data?.adaptive_formats || []).filter(
-  (format) =>
-  format.has_audio && !format.has_video && hasDownloadableUrl(format),
+    (format) =>
+      format.has_audio && !format.has_video && hasDownloadableUrl(format),
   );
 }
 
 function selectBestAudioFormat(info: YTInfo): ParsedYTFormat {
-
   const audioFormats = getAudioFormats(info).sort(
-  (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
+    (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
   );
 
   if (audioFormats.length === 0) {
@@ -626,76 +566,63 @@ function selectBestAudioFormat(info: YTInfo): ParsedYTFormat {
   }
 
   const defaultMp4a = audioFormats.find(
-  (format) =>
-  format.audio_track?.audio_is_default &&
-  format.mime_type?.includes("mp4a"),
+    (format) =>
+      format.audio_track?.audio_is_default &&
+      format.mime_type?.includes("mp4a"),
   );
-
   if (defaultMp4a) return defaultMp4a;
 
   const originalMp4a = audioFormats.find(
-  (format) => format.is_original && format.mime_type?.includes("mp4a"),
+    (format) => format.is_original && format.mime_type?.includes("mp4a"),
   );
-
   if (originalMp4a) return originalMp4a;
 
   const itag140 = audioFormats.find((format) => format.itag === 140);
-
   if (itag140) return itag140;
 
   const bestMp4a = audioFormats.find((format) =>
-  format.mime_type?.includes("mp4a"),
+    format.mime_type?.includes("mp4a"),
   );
-
   if (bestMp4a) return bestMp4a;
 
   const defaultAudio = audioFormats.find(
-  (format) => format.audio_track?.audio_is_default,
+    (format) => format.audio_track?.audio_is_default,
   );
-
   if (defaultAudio) return defaultAudio;
 
   const originalAudio = audioFormats.find((format) => format.is_original);
-
   if (originalAudio) return originalAudio;
 
   return audioFormats[0];
 }
 
 function selectVideoQualities(info: YTInfo): Map<string, ParsedYTFormat> {
-
   const videoFormats = getVideoFormats(info).sort(
-  (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
+    (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
   );
-
   const qualities = new Map<string, ParsedYTFormat>();
 
   const matchesQuality = (format: ParsedYTFormat, quality: string): boolean => {
-
     const label = format.quality_label || "";
     return (
-    label === quality ||
-    new RegExp(`^${quality}(?:\\d+|\\b)`, "i").test(label)
+      label === quality ||
+      new RegExp(`^${quality}(?:\\d+|\\b)`, "i").test(label)
     );
   };
 
   for (const quality of ["1080p", "720p"]) {
-
     const vp9 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
     );
-
     const avc1 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
     );
-
     const av01 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("av01"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("av01"),
     );
-
     const selected = vp9 || avc1 || av01;
 
     if (selected) {
@@ -704,22 +631,18 @@ function selectVideoQualities(info: YTInfo): Map<string, ParsedYTFormat> {
   }
 
   for (const quality of ["480p", "360p", "240p", "144p"]) {
-
     const avc1 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("avc1"),
     );
-
     const vp9 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("vp9"),
     );
-
     const av01 = videoFormats.find(
-    (format) =>
-    matchesQuality(format, quality) && format.mime_type?.includes("av01"),
+      (format) =>
+        matchesQuality(format, quality) && format.mime_type?.includes("av01"),
     );
-
     const selected = avc1 || vp9 || av01;
 
     if (selected) {
@@ -731,7 +654,6 @@ function selectVideoQualities(info: YTInfo): Map<string, ParsedYTFormat> {
 }
 
 function getApiCacheExpiry(info: YTInfo): number {
-
   const expires = info.streaming_data?.expires;
 
   if (!(expires instanceof Date) || Number.isNaN(expires.getTime())) {
@@ -742,7 +664,6 @@ function getApiCacheExpiry(info: YTInfo): number {
 }
 
 async function cleanupCachedFile(cacheKey: string): Promise<void> {
-
   const cacheEntry = remuxedFileCache.get(cacheKey);
 
   if (!cacheEntry) {
@@ -759,15 +680,14 @@ async function cleanupCachedFile(cacheKey: string): Promise<void> {
   try {
     await rm(cacheEntry.filePath, { force: true });
   } catch (error) {
-  console.error(
-  `[Cache] Failed to remove ${cacheEntry.filePath}:`,
-  error instanceof Error ? error.message : error,
-  );
-}
+    console.error(
+      `[Cache] Failed to remove ${cacheEntry.filePath}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
 }
 
 function scheduleFileCleanup(cacheKey: string): void {
-
   const cacheEntry = remuxedFileCache.get(cacheKey);
 
   if (!cacheEntry) {
@@ -784,14 +704,13 @@ function scheduleFileCleanup(cacheKey: string): void {
 }
 
 async function parallelDownloadManager(
-sessionId: string,
-tasks: DownloadTask[],
-destinationFile: string,
-mediaType: "Audio" | "Video",
-player: YTPlayer,
-poToken: string,
+  sessionId: string,
+  tasks: DownloadTask[],
+  destinationFile: string,
+  mediaType: "Audio" | "Video",
+  player: YTPlayer,
+  poToken: string,
 ): Promise<string> {
-
   if (!player) {
     throw new Error("YouTube player is unavailable for stream deciphering.");
   }
@@ -801,35 +720,25 @@ poToken: string,
   }
 
   const startTime = performance.now();
-
   const totalSize = tasks.reduce(
-  (sum, task) => sum + (task.end - task.start + 1),
-  0,
+    (sum, task) => sum + (task.end - task.start + 1),
+    0,
   );
-
   const decipheredUrl = addPoToken(
-  await tasks[0].format.decipher(player),
-  poToken,
+    await tasks[0].format.decipher(player),
+    poToken,
   );
-
   const workerCount = Math.min(tasks.length, MAX_CONCURRENT_DOWNLOADS);
-
   const downloadedChunks = new Map<number, Buffer>();
-
   const writer = Bun.file(destinationFile).writer();
-
   const queue = [...tasks];
-
   const abortController = new AbortController();
 
   let nextChunkToWrite = 0;
-
   let writerClosed = false;
-
   let aborted = false;
 
   const closeWriter = async () => {
-
     if (!writerClosed) {
       writerClosed = true;
       await writer.end();
@@ -837,15 +746,12 @@ poToken: string,
   };
 
   const writeAvailableChunks = () => {
-
     if (writerClosed || aborted) {
       return;
     }
 
     while (downloadedChunks.has(nextChunkToWrite)) {
-
       const chunk = downloadedChunks.get(nextChunkToWrite);
-
       if (!chunk) {
         break;
       }
@@ -857,18 +763,15 @@ poToken: string,
   };
 
   const processTask = async (
-  task: DownloadTask,
-  workerId: number,
+    task: DownloadTask,
+    workerId: number,
   ): Promise<void> => {
-
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= task.retries; attempt++) {
-
       if (aborted) return;
 
       try {
-
         const response = await fetch(decipheredUrl, {
           headers: {
             Range: `bytes=${task.start}-${task.end}`,
@@ -881,12 +784,11 @@ poToken: string,
         }
 
         const buffer = Buffer.from(await response.arrayBuffer());
-
         const expectedLength = task.end - task.start + 1;
 
         if (buffer.byteLength !== expectedLength) {
           throw new Error(
-          `Expected ${expectedLength} bytes but received ${buffer.byteLength} bytes.`,
+            `Expected ${expectedLength} bytes but received ${buffer.byteLength} bytes.`,
           );
         }
 
@@ -897,103 +799,64 @@ poToken: string,
 
         return;
       } catch (error) {
+        if (aborted) return;
+        lastError = error;
 
-      if (aborted) return;
-      lastError = error;
-
-      if (attempt < task.retries) {
-        await new Promise((resolve) =>
-        setTimeout(resolve, 500 * (attempt + 1)),
-        );
+        if (attempt < task.retries) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, 500 * (attempt + 1)),
+          );
+        }
       }
     }
+
+    aborted = true;
+    abortController.abort();
+
+    throw new Error(
+      `[${sessionId}] ${mediaType} worker ${workerId} failed ${task.description}: ${
+        lastError instanceof Error ? lastError.message : String(lastError)
+      }`,
+    );
+  };
+
+  try {
+    await Promise.all(
+      Array.from({ length: workerCount }, (_, workerIndex) =>
+        (async () => {
+          while (!aborted && queue.length > 0) {
+            const task = queue.shift();
+            if (task) {
+              await processTask(task, workerIndex + 1);
+            }
+          }
+        })(),
+      ),
+    );
+
+    await closeWriter();
+
+    const durationSeconds = (performance.now() - startTime) / 1000;
+    const speed = durationSeconds > 0 ? totalSize / durationSeconds : 0;
+
+    console.log(
+      `[${sessionId}] ${mediaType} download complete: ${formatBytes(
+        totalSize,
+      )} in ${durationSeconds.toFixed(2)}s (${formatBytes(speed)}/s).`,
+    );
+
+    return destinationFile;
+  } catch (error) {
+    aborted = true;
+    abortController.abort();
+    downloadedChunks.clear();
+    await closeWriter();
+    await rm(destinationFile, { force: true }).catch(() => {});
+    throw error;
   }
-
-  aborted = true;
-  abortController.abort();
-
-  throw new Error(
-  `[${sessionId}] ${mediaType} worker ${workerId} failed ${task.description}: ${
-  lastError instanceof Error ? lastError.message : String(lastError)
-}`,
-);
-};
-
-try {
-  await Promise.all(
-  Array.from({ length: workerCount }, (_, workerIndex) =>
-  (async () => {
-
-    while (!aborted && queue.length > 0) {
-
-      const task = queue.shift();
-
-      if (task) {
-        await processTask(task, workerIndex + 1);
-      }
-    }
-  })(),
-  ),
-  );
-
-  await closeWriter();
-
-  const durationSeconds = (performance.now() - startTime) / 1000;
-
-  const speed = durationSeconds > 0 ? totalSize / durationSeconds : 0;
-
-  console.log(
-  `[${sessionId}] ${mediaType} download complete: ${formatBytes(
-  totalSize,
-  )} in ${durationSeconds.toFixed(2)}s (${formatBytes(speed)}/s).`,
-  );
-
-  return destinationFile;
-} catch (error) {
-aborted = true;
-abortController.abort();
-downloadedChunks.clear();
-await closeWriter();
-await rm(destinationFile, { force: true }).catch(() => {});
-throw error;
 }
-}
-
-Platform.shim.eval = async (
-data: Types.BuildScriptResult,
-): Promise<Record<string, unknown>> => {
-  return new Function(data.output)();
-};
-
-console.log("Server starting: performing one-time setup.");
-
-const setupStartTime = performance.now();
-
-const cookie = await getCookieFileContent(COOKIE_FILE_PATH);
-await getWebPoMinter();
-
-innertube = await Innertube.create({
-  cookie: cookie || undefined,
-  cache: new UniversalCache(false),
-  client_type: ClientType.WEB,
-  retrieve_player: true,
-  retrieve_innertube_config: true,
-});
-
-if (!innertube.session.player) {
-  throw new Error(
-  "YouTube player initialization failed. Stream deciphering cannot continue.",
-  );
-}
-
-await initialize();
-
-console.log(
-`One-time setup complete in ${(performance.now() - setupStartTime).toFixed(2)}ms.`,
-);
 
 function scheduleIdleRestart(): void {
-
   if (!restartScheduled) {
     return;
   }
@@ -1003,7 +866,6 @@ function scheduleIdleRestart(): void {
   }
 
   shutdownTimer = setTimeout(() => {
-
     if (activeOperations === 0 && activeRequests === 0) {
       void gracefulShutdown("Server is idle after a scheduled restart.");
     }
@@ -1011,7 +873,6 @@ function scheduleIdleRestart(): void {
 }
 
 async function gracefulShutdown(reason: string): Promise<void> {
-
   if (!restartScheduled) {
     return;
   }
@@ -1039,148 +900,135 @@ async function getOrFetchVideoData(videoId: string): Promise<{
   cacheHit: boolean;
   audioTunnelId: string;
 }> {
+  const cachedData = videoDataCache.get(videoId);
 
-const cachedData = videoDataCache.get(videoId);
+  if (cachedData && cachedData.expiryTimestamp > Date.now()) {
+    const audioTunnelId = cachedData.tunnels.get(
+      cachedData.bestAudioFormat.itag,
+    );
 
-if (cachedData && cachedData.expiryTimestamp > Date.now()) {
+    if (!audioTunnelId) {
+      throw new Error("Cached audio tunnel ID is missing.");
+    }
 
-  const audioTunnelId = cachedData.tunnels.get(
-  cachedData.bestAudioFormat.itag,
-  );
-
-  if (!audioTunnelId) {
-    throw new Error("Cached audio tunnel ID is missing.");
+    return {
+      videoData: cachedData,
+      cacheHit: true,
+      audioTunnelId,
+    };
   }
 
-  return {
-    videoData: cachedData,
-    cacheHit: true,
-    audioTunnelId,
-  };
-}
+  videoDataCache.delete(videoId);
 
-videoDataCache.delete(videoId);
+  const infoFetchStart = performance.now();
+  const contentPoToken = await mintContentPoToken(videoId);
 
-const infoFetchStart = performance.now();
-
-const contentPoToken = await mintContentPoToken(videoId);
-
-let info = await innertube.getBasicInfo(videoId, {
-  client: "YTMUSIC",
-  po_token: contentPoToken,
-});
-
-if (
-info.playability_status?.status !== "OK" ||
-!info.streaming_data?.adaptive_formats?.length
-) {
-  info = await innertube.getBasicInfo(videoId, {
-    client: "WEB",
+  let info = await innertube.getBasicInfo(videoId, {
+    client: "YTMUSIC",
     po_token: contentPoToken,
   });
-}
 
-const fetchDuration = performance.now() - infoFetchStart;
+  if (
+    info.playability_status?.status !== "OK" ||
+    !info.streaming_data?.adaptive_formats?.length
+  ) {
+    info = await innertube.getBasicInfo(videoId, {
+      client: "WEB",
+      po_token: contentPoToken,
+    });
+  }
 
-const player = innertube.session.player;
+  const fetchDuration = performance.now() - infoFetchStart;
+  const player = innertube.session.player;
 
-if (!player) {
-  throw new Error("YouTube player is unavailable after video info retrieval.");
-}
+  if (!player) {
+    throw new Error("YouTube player is unavailable after video info retrieval.");
+  }
 
-console.log(
-`[${videoId}] Video info fetched in ${fetchDuration.toFixed(2)}ms.`,
-);
-
-if (fetchDuration > 20000 && !restartScheduled) {
-  restartScheduled = true;
-  scheduleIdleRestart();
-}
-
-if (info.playability_status?.status !== "OK") {
-  throw new Error(
-  `Video not playable: ${
-    info.playability_status?.reason || info.playability_status?.status
-  }`,
+  console.log(
+    `[${videoId}] Video info fetched in ${fetchDuration.toFixed(2)}ms.`,
   );
-}
 
-if (!info.streaming_data?.adaptive_formats?.length) {
-  throw new Error("No adaptive streaming formats were found.");
-}
+  if (fetchDuration > 20000 && !restartScheduled) {
+    restartScheduled = true;
+    scheduleIdleRestart();
+  }
 
-const bestAudioFormat = selectBestAudioFormat(info);
+  if (info.playability_status?.status !== "OK") {
+    throw new Error(
+      `Video not playable: ${
+        info.playability_status?.reason || info.playability_status?.status
+      }`,
+    );
+  }
 
-const selectedQualities = selectVideoQualities(info);
+  if (!info.streaming_data?.adaptive_formats?.length) {
+    throw new Error("No adaptive streaming formats were found.");
+  }
 
-const tunnels = new Map<number, string>();
+  const bestAudioFormat = selectBestAudioFormat(info);
+  const selectedQualities = selectVideoQualities(info);
+  const tunnels = new Map<number, string>();
+  const expiryTimestamp =
+    Date.now() + TUNNEL_LINK_EXPIRATION_HOURS * 60 * 60 * 1000;
+  const title = info.basic_info.title || "Unknown Title";
+  const channel = info.basic_info.author || "Unknown Channel";
+  const safeBaseName = sanitizeFilename(`${title} - ${channel}`);
 
-const expiryTimestamp =
-Date.now() + TUNNEL_LINK_EXPIRATION_HOURS * 60 * 60 * 1000;
+  for (const format of selectedQualities.values()) {
+    const tunnelId = Bun.randomUUIDv7();
+    const codec = format.mime_type?.includes("vp9")
+      ? "vp9"
+      : format.mime_type?.includes("av01")
+        ? "av1"
+        : "h264";
 
-const title = info.basic_info.title || "Unknown Title";
+    tunnels.set(format.itag, tunnelId);
 
-const channel = info.basic_info.author || "Unknown Channel";
+    tunnelSessions.set(tunnelId, {
+      videoId,
+      itag: format.itag,
+      info,
+      player,
+      bestAudioFormat,
+      chosenVideoFormat: format,
+      expiryTimestamp,
+      filename: `${safeBaseName} (${format.quality_label || "video"}, ${codec}).mp4`,
+    });
+  }
 
-const safeBaseName = sanitizeFilename(`${title} - ${channel}`);
+  const audioTunnelId = Bun.randomUUIDv7();
+  const audioExtension = bestAudioFormat.mime_type?.includes("mp4a")
+    ? "m4a"
+    : "webm";
 
-for (const format of selectedQualities.values()) {
+  tunnels.set(bestAudioFormat.itag, audioTunnelId);
 
-  const tunnelId = Bun.randomUUIDv7();
-
-  const codec = format.mime_type?.includes("vp9")
-  ? "vp9"
-  : format.mime_type?.includes("av01")
-  ? "av1"
-  : "h264";
-
-  tunnels.set(format.itag, tunnelId);
-
-  tunnelSessions.set(tunnelId, {
+  tunnelSessions.set(audioTunnelId, {
     videoId,
-    itag: format.itag,
+    itag: bestAudioFormat.itag,
     info,
     player,
     bestAudioFormat,
-    chosenVideoFormat: format,
     expiryTimestamp,
-    filename: `${safeBaseName} (${format.quality_label || "video"}, ${codec}).mp4`,
+    filename: `${safeBaseName}.${audioExtension}`,
   });
-}
 
-const audioTunnelId = Bun.randomUUIDv7();
+  const videoData: VideoCacheEntry = {
+    info,
+    player,
+    tunnels,
+    bestAudioFormat,
+    expiryTimestamp: getApiCacheExpiry(info),
+  };
 
-const audioExtension = bestAudioFormat.mime_type?.includes("mp4a")
-? "m4a"
-: "webm";
+  videoDataCache.set(videoId, videoData);
 
-tunnels.set(bestAudioFormat.itag, audioTunnelId);
-
-tunnelSessions.set(audioTunnelId, {
-  videoId,
-  itag: bestAudioFormat.itag,
-  info,
-  player,
-  bestAudioFormat,
-  expiryTimestamp,
-  filename: `${safeBaseName}.${audioExtension}`,
-});
-
-const videoData: VideoCacheEntry = {
-  info,
-  player,
-  tunnels,
-  bestAudioFormat,
-  expiryTimestamp: getApiCacheExpiry(info),
-};
-
-videoDataCache.set(videoId, videoData);
-
-return {
-  videoData,
-  cacheHit: false,
-  audioTunnelId,
-};
+  return {
+    videoData,
+    cacheHit: false,
+    audioTunnelId,
+  };
 }
 
 async function getOrFetchSearchResults(searchQuery: string): Promise<{
@@ -1188,95 +1036,84 @@ async function getOrFetchSearchResults(searchQuery: string): Promise<{
   fetchTime: number;
   cacheHit: boolean;
 }> {
+  const startTime = performance.now();
+  const cacheKey = searchQuery.trim().toLowerCase();
+  const cachedEntry = searchCache.get(cacheKey);
 
-const startTime = performance.now();
+  if (cachedEntry && cachedEntry.expires > Date.now()) {
+    return {
+      results: cachedEntry.results,
+      fetchTime: performance.now() - startTime,
+      cacheHit: true,
+    };
+  }
 
-const cacheKey = searchQuery.trim().toLowerCase();
+  searchCache.delete(cacheKey);
 
-const cachedEntry = searchCache.get(cacheKey);
+  const search = await innertube.search(searchQuery, { type: "video" });
+  const results: VideoResult[] = [];
 
-if (cachedEntry && cachedEntry.expires > Date.now()) {
+  for (const item of search.results) {
+    if (item.is(YTNodes.Video)) {
+      results.push({
+        videoId: item.video_id,
+        title: item.title.toString(),
+        author: item.author.name,
+        duration: item.duration.text || "Unknown",
+        thumbnail: item.best_thumbnail?.url || "",
+      });
+      continue;
+    }
+
+    if (
+      item.is(YTNodes.LockupView) &&
+      (item.content_type === "VIDEO" || item.content_type === "SHORT") &&
+      /^[a-zA-Z0-9_-]{11}$/.test(item.content_id)
+    ) {
+      const thumbnail = item.content_image?.is(YTNodes.ThumbnailView)
+        ? item.content_image.image.at(-1)?.url || ""
+        : "";
+      const metadataRows = item.metadata?.metadata?.metadata_rows || [];
+      const metadataText = metadataRows
+        .flatMap((row) => row.metadata_parts || [])
+        .map((part) => part.text?.toString() || "")
+        .filter(Boolean);
+      const duration =
+        metadataText.find((text) => /^\d+(?::[0-5]\d)+$/.test(text)) ||
+        "Unknown";
+      const author =
+        metadataText.find((text) => !/^\d+(?::[0-5]\d)+$/.test(text)) ||
+        "Unknown Channel";
+
+      results.push({
+        videoId: item.content_id,
+        title: item.metadata?.title.toString() || "Unknown Title",
+        author,
+        duration,
+        thumbnail,
+      });
+    }
+  }
+
+  if (results.length > 0) {
+    searchCache.set(cacheKey, {
+      results,
+      expires: Date.now() + SEARCH_CACHE_TTL,
+    });
+  }
+
   return {
-    results: cachedEntry.results,
+    results,
     fetchTime: performance.now() - startTime,
-    cacheHit: true,
+    cacheHit: false,
   };
 }
 
-searchCache.delete(cacheKey);
-
-const search = await innertube.search(searchQuery, { type: "video" });
-
-const results: VideoResult[] = [];
-
-for (const item of search.results) {
-
-  if (item.is(YTNodes.Video)) {
-    results.push({
-      videoId: item.video_id,
-      title: item.title.toString(),
-      author: item.author.name,
-      duration: item.duration.text || "Unknown",
-      thumbnail: item.best_thumbnail?.url || "",
-    });
-    continue;
-  }
-
-  if (
-  item.is(YTNodes.LockupView) &&
-  (item.content_type === "VIDEO" || item.content_type === "SHORT") &&
-  /^[a-zA-Z0-9_-]{11}$/.test(item.content_id)
-  ) {
-
-    const thumbnail = item.content_image?.is(YTNodes.ThumbnailView)
-    ? item.content_image.image.at(-1)?.url || ""
-    : "";
-
-    const metadataRows = item.metadata?.metadata?.metadata_rows || [];
-
-    const metadataText = metadataRows
-    .flatMap((row) => row.metadata_parts || [])
-    .map((part) => part.text?.toString() || "")
-    .filter(Boolean);
-
-    const duration =
-    metadataText.find((text) => /^\d+(?::[0-5]\d)+$/.test(text)) ||
-    "Unknown";
-
-    const author =
-    metadataText.find((text) => !/^\d+(?::[0-5]\d)+$/.test(text)) ||
-    "Unknown Channel";
-
-    results.push({
-      videoId: item.content_id,
-      title: item.metadata?.title.toString() || "Unknown Title",
-      author,
-      duration,
-      thumbnail,
-    });
-  }
-}
-
-if (results.length > 0) {
-  searchCache.set(cacheKey, {
-    results,
-    expires: Date.now() + SEARCH_CACHE_TTL,
-  });
-}
-
-return {
-  results,
-  fetchTime: performance.now() - startTime,
-  cacheHit: false,
-};
-}
-
 async function getOrStartDownload(
-session: TunnelSession,
-cacheKey: string,
-isAudioOnly: boolean,
+  session: TunnelSession,
+  cacheKey: string,
+  isAudioOnly: boolean,
 ): Promise<FileCacheEntry> {
-
   const cachedFile = remuxedFileCache.get(cacheKey);
 
   if (cachedFile) {
@@ -1291,72 +1128,64 @@ isAudioOnly: boolean,
   }
 
   const downloadPromise = (async (): Promise<FileCacheEntry> => {
-
     const tempDir = join(TEMP_DIR_BASE, Bun.randomUUIDv7());
 
     try {
-
       const contentPoToken = await mintContentPoToken(session.videoId);
       await mkdir(tempDir, { recursive: true });
 
       const finalFilename = session.filename;
-
       const diskExtension = finalFilename.endsWith(".webm")
-      ? "webm"
-      : finalFilename.endsWith(".m4a")
-      ? "m4a"
-      : "mp4";
-
+        ? "webm"
+        : finalFilename.endsWith(".m4a")
+          ? "m4a"
+          : "mp4";
       const finalFilePath = join(DOWNLOAD_DIR, `${cacheKey}.${diskExtension}`);
-
       const audioFormat = session.bestAudioFormat;
-
       const audioExtension = getFormatExtension(
-      audioFormat,
-      audioFormat.mime_type?.includes("mp4a") ? "m4a" : "webm",
+        audioFormat,
+        audioFormat.mime_type?.includes("mp4a") ? "m4a" : "webm",
       );
 
       if (isAudioOnly) {
-
         const rawAudioPath = join(tempDir, `audio.${audioExtension}`);
-
         const audioTasks = createDownloadTasks(audioFormat, "Audio");
 
         await parallelDownloadManager(
-        cacheKey,
-        audioTasks,
-        rawAudioPath,
-        "Audio",
-        session.player,
-        contentPoToken,
+          cacheKey,
+          audioTasks,
+          rawAudioPath,
+          "Audio",
+          session.player,
+          contentPoToken,
         );
 
         const ffmpegArgs = audioFormat.mime_type?.includes("mp4a")
-        ? [
-        ffmpeg!,
-        "-loglevel",
-        "error",
-        "-i",
-        rawAudioPath,
-        "-c:a",
-        "copy",
-        "-movflags",
-        "faststart",
-        "-y",
-        finalFilePath,
-        ]
-        : [
-        ffmpeg!,
-        "-loglevel",
-        "error",
-        "-i",
-        rawAudioPath,
-        "-vn",
-        "-c:a",
-        "copy",
-        "-y",
-        finalFilePath,
-        ];
+          ? [
+              ffmpeg!,
+              "-loglevel",
+              "error",
+              "-i",
+              rawAudioPath,
+              "-c:a",
+              "copy",
+              "-movflags",
+              "faststart",
+              "-y",
+              finalFilePath,
+            ]
+          : [
+              ffmpeg!,
+              "-loglevel",
+              "error",
+              "-i",
+              rawAudioPath,
+              "-vn",
+              "-c:a",
+              "copy",
+              "-y",
+              finalFilePath,
+            ];
 
         const ffmpegProcess = Bun.spawn(ffmpegArgs, {
           stdout: "ignore",
@@ -1364,130 +1193,114 @@ isAudioOnly: boolean,
         });
 
         if ((await ffmpegProcess.exited) !== 0) {
-
           const stderr = await new Response(ffmpegProcess.stderr).text();
           throw new Error(`FFmpeg audio remux failed: ${stderr}`);
         }
       } else {
+        const videoFormat = session.chosenVideoFormat;
 
-      const videoFormat = session.chosenVideoFormat;
+        if (!videoFormat) {
+          throw new Error("A video stream was not selected for this request.");
+        }
 
-      if (!videoFormat) {
-        throw new Error("A video stream was not selected for this request.");
+        const videoExtension = getFormatExtension(videoFormat, "mp4");
+        const rawVideoPath = join(tempDir, `video.${videoExtension}`);
+        const rawAudioPath = join(tempDir, `audio.${audioExtension}`);
+        const videoTasks = createDownloadTasks(videoFormat, "Video");
+        const audioTasks = createDownloadTasks(audioFormat, "Audio");
+
+        await Promise.all([
+          parallelDownloadManager(
+            cacheKey,
+            videoTasks,
+            rawVideoPath,
+            "Video",
+            session.player,
+            contentPoToken,
+          ),
+          parallelDownloadManager(
+            cacheKey,
+            audioTasks,
+            rawAudioPath,
+            "Audio",
+            session.player,
+            contentPoToken,
+          ),
+        ]);
+
+        const ffmpegProcess = Bun.spawn(
+          [
+            ffmpeg!,
+            "-loglevel",
+            "error",
+            "-i",
+            rawVideoPath,
+            "-i",
+            rawAudioPath,
+            "-c",
+            "copy",
+            "-movflags",
+            "faststart",
+            "-y",
+            finalFilePath,
+          ],
+          {
+            stdout: "ignore",
+            stderr: "pipe",
+          },
+        );
+
+        if ((await ffmpegProcess.exited) !== 0) {
+          const stderr = await new Response(ffmpegProcess.stderr).text();
+          throw new Error(`FFmpeg video remux failed: ${stderr}`);
+        }
       }
 
-      const videoExtension = getFormatExtension(videoFormat, "mp4");
+      const cacheEntry: FileCacheEntry = {
+        filePath: finalFilePath,
+        filename: finalFilename,
+        expiryTimeoutId: null,
+      };
 
-      const rawVideoPath = join(tempDir, `video.${videoExtension}`);
+      remuxedFileCache.set(cacheKey, cacheEntry);
+      scheduleFileCleanup(cacheKey);
 
-      const rawAudioPath = join(tempDir, `audio.${audioExtension}`);
-
-      const videoTasks = createDownloadTasks(videoFormat, "Video");
-
-      const audioTasks = createDownloadTasks(audioFormat, "Audio");
-
-      await Promise.all([
-      parallelDownloadManager(
-      cacheKey,
-      videoTasks,
-      rawVideoPath,
-      "Video",
-      session.player,
-      contentPoToken,
-      ),
-      parallelDownloadManager(
-      cacheKey,
-      audioTasks,
-      rawAudioPath,
-      "Audio",
-      session.player,
-      contentPoToken,
-      ),
-      ]);
-
-      const ffmpegProcess = Bun.spawn(
-      [
-      ffmpeg!,
-      "-loglevel",
-      "error",
-      "-i",
-      rawVideoPath,
-      "-i",
-      rawAudioPath,
-      "-c",
-      "copy",
-      "-movflags",
-      "faststart",
-      "-y",
-      finalFilePath,
-      ],
-      {
-        stdout: "ignore",
-        stderr: "pipe",
-      },
-      );
-
-      if ((await ffmpegProcess.exited) !== 0) {
-
-        const stderr = await new Response(ffmpegProcess.stderr).text();
-        throw new Error(`FFmpeg video remux failed: ${stderr}`);
-      }
+      return cacheEntry;
+    } finally {
+      activeDownloads.delete(cacheKey);
+      await rm(tempDir, { recursive: true, force: true });
     }
+  })();
 
-    const cacheEntry: FileCacheEntry = {
-      filePath: finalFilePath,
-      filename: finalFilename,
-      expiryTimeoutId: null,
-    };
-
-    remuxedFileCache.set(cacheKey, cacheEntry);
-    scheduleFileCleanup(cacheKey);
-
-    return cacheEntry;
-  } finally {
-  activeDownloads.delete(cacheKey);
-  await rm(tempDir, { recursive: true, force: true });
-}
-})();
-
-activeDownloads.set(cacheKey, downloadPromise);
-
-return downloadPromise;
+  activeDownloads.set(cacheKey, downloadPromise);
+  return downloadPromise;
 }
 
 async function handleVideoRequest(
-videoId: string,
-query: {
-  url: string;
-  quality?: string;
-  format?: string;
-},
-request: Request,
-set: any,
-startTime: number,
+  videoId: string,
+  query: {
+    url: string;
+    quality?: string;
+    format?: string;
+  },
+  request: Request,
+  set: any,
+  startTime: number,
 ) {
-
   const { videoData, cacheHit, audioTunnelId } =
-  await getOrFetchVideoData(videoId);
-
+    await getOrFetchVideoData(videoId);
   const { info, tunnels, bestAudioFormat } = videoData;
-
   const requestUrl = new URL(request.url);
-
   const baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
-
   const title = info.basic_info.title || "Unknown Title";
-
   const channel = info.basic_info.author || "Unknown Channel";
-
   const bestThumbnail =
-  info.basic_info.thumbnail?.find((thumbnail) => thumbnail.width >= 1000)
-  ?.url ||
-  info.basic_info.thumbnail?.at(-1)?.url ||
-  "";
+    info.basic_info.thumbnail?.find((thumbnail) => thumbnail.width >= 1000)
+      ?.url ||
+    info.basic_info.thumbnail?.at(-1)?.url ||
+    "";
 
   if (query.format?.toLowerCase() === "m4a") {
-
     const audioSession = tunnelSessions.get(audioTunnelId);
 
     if (!audioSession) {
@@ -1497,47 +1310,40 @@ startTime: number,
     set.headers["Content-Type"] = "application/json; charset=utf-8";
 
     return new Response(
-    JSON.stringify(
-    {
-      status: "ok",
-      videoId,
-      cached: cacheHit,
-      title,
-      quality: "audio",
-      channel,
-      thumbnail: bestThumbnail,
-      filename: audioSession.filename,
-      size: formatBytes(getFormatContentLength(bestAudioFormat)),
-      expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
-      infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
-      downloadLink: `${baseUrl}/tunnel/${audioTunnelId}`,
-    },
-    null,
-    2,
-    ),
+      JSON.stringify(
+        {
+          status: "ok",
+          videoId,
+          cached: cacheHit,
+          title,
+          quality: "audio",
+          channel,
+          thumbnail: bestThumbnail,
+          filename: audioSession.filename,
+          size: formatBytes(getFormatContentLength(bestAudioFormat)),
+          expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
+          infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+          downloadLink: `${baseUrl}/tunnel/${audioTunnelId}`,
+        },
+        null,
+        2,
+      ),
     );
   }
 
   const selectedQualities = selectVideoQualities(info);
-
   const qualityOrder = ["1080p", "720p", "480p", "360p", "240p", "144p"];
 
   if (query.quality) {
-
     const normalizedQuality = query.quality.endsWith("p")
-    ? query.quality
-    : `${query.quality}p`;
-
+      ? query.quality
+      : `${query.quality}p`;
     const requestedIndex = qualityOrder.indexOf(normalizedQuality);
-
     let targetFormat: ParsedYTFormat | undefined;
 
     if (requestedIndex >= 0) {
-
       for (const quality of qualityOrder.slice(requestedIndex)) {
-
         const format = selectedQualities.get(quality);
-
         if (format && tunnels.has(format.itag)) {
           targetFormat = format;
           break;
@@ -1546,11 +1352,8 @@ startTime: number,
     }
 
     if (!targetFormat) {
-
       for (const quality of qualityOrder) {
-
         const format = selectedQualities.get(quality);
-
         if (format && tunnels.has(format.itag)) {
           targetFormat = format;
           break;
@@ -1560,7 +1363,6 @@ startTime: number,
 
     if (!targetFormat) {
       set.status = 404;
-
       return {
         success: false,
         error: "The requested quality is not available for this video.",
@@ -1582,58 +1384,50 @@ startTime: number,
     set.headers["Content-Type"] = "application/json; charset=utf-8";
 
     return new Response(
-    JSON.stringify(
-    {
-      status: "ok",
-      videoId,
-      cached: cacheHit,
-      title,
-      quality: targetFormat.quality_label || normalizedQuality,
-      channel,
-      thumbnail: bestThumbnail,
-      filename: session.filename,
-      size: formatBytes(
-      getFormatContentLength(targetFormat) +
-      getFormatContentLength(bestAudioFormat),
+      JSON.stringify(
+        {
+          status: "ok",
+          videoId,
+          cached: cacheHit,
+          title,
+          quality: targetFormat.quality_label || normalizedQuality,
+          channel,
+          thumbnail: bestThumbnail,
+          filename: session.filename,
+          size: formatBytes(
+            getFormatContentLength(targetFormat) +
+              getFormatContentLength(bestAudioFormat),
+          ),
+          expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
+          infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+          downloadLink: `${baseUrl}/tunnel/${tunnelId}`,
+        },
+        null,
+        2,
       ),
-      expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
-      infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
-      downloadLink: `${baseUrl}/tunnel/${tunnelId}`,
-    },
-    null,
-    2,
-    ),
     );
   }
 
   const media: MediaInfo[] = [];
 
   for (const quality of qualityOrder) {
-
     const format = selectedQualities.get(quality);
-
-    if (!format) {
-      continue;
-    }
+    if (!format) continue;
 
     const tunnelId = tunnels.get(format.itag);
-
     const session = tunnelId ? tunnelSessions.get(tunnelId) : undefined;
-
-    if (!session || !tunnelId) {
-      continue;
-    }
+    if (!session || !tunnelId) continue;
 
     const codec = format.mime_type?.includes("vp9")
-    ? "vp9"
-    : format.mime_type?.includes("av01")
-    ? "av1"
-    : "h264";
+      ? "vp9"
+      : format.mime_type?.includes("av01")
+        ? "av1"
+        : "h264";
 
     media.push({
       quality: format.quality_label,
       size: formatBytes(
-      getFormatContentLength(format) + getFormatContentLength(bestAudioFormat),
+        getFormatContentLength(format) + getFormatContentLength(bestAudioFormat),
       ),
       codec,
       url: `${baseUrl}/tunnel/${tunnelId}`,
@@ -1656,716 +1450,713 @@ startTime: number,
   set.headers["Content-Type"] = "application/json; charset=utf-8";
 
   return new Response(
-  JSON.stringify(
-  {
-    success: true,
-    videoId,
-    cached: cacheHit,
-    title,
-    channel,
-    thumbnail: bestThumbnail,
-    expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
-    infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
-    media,
-  },
-  null,
-  2,
-  ),
+    JSON.stringify(
+      {
+        success: true,
+        videoId,
+        cached: cacheHit,
+        title,
+        channel,
+        thumbnail: bestThumbnail,
+        expires: formatDuration(TUNNEL_LINK_EXPIRATION_HOURS * 3600),
+        infoFetchTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+        media,
+      },
+      null,
+      2,
+    ),
   );
 }
+
+Platform.shim.eval = async (
+  data: Types.BuildScriptResult,
+): Promise<Record<string, unknown>> => {
+  return new Function(data.output)();
+};
+
+console.log("Server starting: performing one-time setup.");
+
+const setupStartTime = performance.now();
+const cookie = await getCookieFileContent(COOKIE_FILE_PATH);
+await getWebPoMinter();
+
+innertube = await Innertube.create({
+  cookie: cookie || undefined,
+  cache: new UniversalCache(false),
+  client_type: ClientType.WEB,
+  retrieve_player: true,
+  retrieve_innertube_config: true,
+});
+
+if (!innertube.session.player) {
+  throw new Error(
+    "YouTube player initialization failed. Stream deciphering cannot continue.",
+  );
+}
+
+await initialize();
+
+console.log(
+  `One-time setup complete in ${(performance.now() - setupStartTime).toFixed(2)}ms.`,
+);
 
 const app = new Elysia()
-.use(staticPlugin({ assets: "public", prefix: "", alwaysStatic: true }))
-.onBeforeHandle(({ request, set }) => {
+  .use(staticPlugin({ assets: "public", prefix: "", alwaysStatic: true }))
+  .onBeforeHandle(({ request, set }) => {
+    const ip = getIp(request);
 
-const ip = getIp(request);
-
-if (!checkRateLimit(ip) || isSpam(request)) {
-  set.status = 429;
-  return {
-    status: "error",
-    message: "Rate limit exceeded or spam detected",
-  };
-}
-
-activeRequests++;
-
-if (shutdownTimer) {
-  clearTimeout(shutdownTimer);
-  shutdownTimer = null;
-}
-})
-.onAfterHandle(({ response, set }) => {
-activeRequests = Math.max(0, activeRequests - 1);
-
-if (restartScheduled && activeRequests === 0 && activeOperations === 0) {
-  scheduleIdleRestart();
-}
-
-if (
-typeof response === "object" &&
-response !== null &&
-!(response instanceof Response)
-) {
-  set.headers["Content-Type"] = "application/json; charset=utf-8";
-}
-})
-.onError(() => {
-  activeRequests = Math.max(0, activeRequests - 1);
-
-  if (restartScheduled && activeRequests === 0 && activeOperations === 0) {
-    scheduleIdleRestart();
-  }
-})
-.onStart(async () => {
-  await mkdir(TEMP_DIR_BASE, { recursive: true });
-  await mkdir(DOWNLOAD_DIR, { recursive: true });
-
-  setInterval(() => {
-
-    const now = Date.now();
-
-    for (const [id, session] of tunnelSessions.entries()) {
-
-      if (session.expiryTimestamp <= now) {
-        tunnelSessions.delete(id);
-      }
-    }
-
-    for (const [videoId, entry] of videoDataCache.entries()) {
-
-      if (entry.expiryTimestamp <= now) {
-        videoDataCache.delete(videoId);
-      }
-    }
-
-    for (const [cacheKey, entry] of remuxedFileCache.entries()) {
-
-      if (!entry.expiryTimeoutId) {
-        void cleanupCachedFile(cacheKey);
-      }
-    }
-  }, 60 * 60 * 1000);
-
-  console.log("API startup complete.");
-})
-.get("/admin", () => new Response(Bun.file("public/admin.html")))
-.get("/admin/", () => new Response(Bun.file("public/admin.html")))
-.group("/admin", (admin) =>
-admin
-.onBeforeHandle(({ request, set }) => {
-
-if (!ADMIN_USER || !ADMIN_PASS) {
-  set.status = 500;
-  return {
-    success: false,
-    error: "Server admin credentials are not configured in .env",
-  };
-}
-
-const auth = request.headers.get("Authorization");
-
-const expected = `Basic ${btoa(`${ADMIN_USER}:${ADMIN_PASS}`)}`;
-
-if (auth !== expected) {
-  set.status = 401;
-  return {
-    success: false,
-    error: "Unauthorized",
-  };
-}
-})
-.get("/stats", () => {
-
-  const memory = process.memoryUsage();
-
-  const protection = ProtectionManager.getStats();
-
-  const uptimeHours = Math.floor(process.uptime() / 3600);
-
-  return {
-    activeOperations,
-    activeRequests,
-    memoryUsage: formatBytes(memory.heapUsed),
-    blockedCount: protection.blockedCount,
-    activeRateLimitedIps: protection.activeRateLimitedIps,
-    uptime: `${uptimeHours}h`,
-  };
-})
-.post("/block", ({ body, set }: any) => {
-
-if (!body?.ip) {
-  set.status = 400;
-  return {
-    success: false,
-    error: "No IP provided",
-  };
-}
-
-ProtectionManager.blockIp(body.ip);
-
-return {
-  success: true,
-  message: `IP ${body.ip} blocked`,
-};
-})
-.post("/unblock", ({ body, set }: any) => {
-
-if (!body?.ip) {
-  set.status = 400;
-  return {
-    success: false,
-    error: "No IP provided",
-  };
-}
-
-ProtectionManager.unblockIp(body.ip);
-
-return {
-  success: true,
-  message: `IP ${body.ip} unblocked`,
-};
-})
-.post("/clear-cache", async () => {
-
-  const fileEntries = [...remuxedFileCache.entries()];
-
-  for (const [cacheKey] of fileEntries) {
-    await cleanupCachedFile(cacheKey);
-  }
-
-  const searches = searchCache.size;
-  searchCache.clear();
-  videoDataCache.clear();
-
-  return {
-    success: true,
-    message: `Cleared ${fileEntries.length} files and ${searches} search entries.`,
-  };
-})
-.post("/restart-timer", () => {
-  restartScheduled = true;
-  scheduleIdleRestart();
-
-  return {
-    success: true,
-    message: "Idle restart timer scheduled.",
-  };
-}),
-)
-.get("/api/stats", () => getSystemStats())
-.get("/api/ip", async ({ request }) => getIpInfo(getIp(request)))
-.get("/api/device", ({ request }) => getDeviceInfo(request))
-.get(
-"/robots.txt",
-() =>
-new Response(["User-agent: *", "Disallow: /"].join("\n"), {
-  headers: {
-    "Content-Type": "text/plain; charset=utf-8",
-  },
-}),
-)
-.get(
-"/",
-async ({ query, request, set }) => {
-
-if (!query.url) {
-  return new Response(Bun.file("public/home.html"));
-}
-
-const startTime = performance.now();
-
-let videoId: string | null = null;
-
-try {
-  videoId = getVideoId(query.url);
-
-  if (!videoId) {
-    set.status = 400;
-    return {
-      success: false,
-      error: "Invalid or unsupported YouTube URL provided.",
-    };
-  }
-
-  return await handleVideoRequest(
-  videoId,
-  {
-    url: query.url,
-    quality: query.quality,
-    format: query.format,
-  },
-  request,
-  set,
-  startTime,
-  );
-} catch (error) {
-set.status = 500;
-
-const payload = {
-  success: false,
-  error: error instanceof Error ? error.message : "Unknown error",
-  name: error instanceof Error ? error.name : "Error",
-  stack: error instanceof Error ? error.stack : undefined,
-  timestamp: new Date().toISOString(),
-};
-
-await Bun.write("./last-error.json", JSON.stringify(payload, null, 2));
-
-return new Response(JSON.stringify(payload, null, 2), {
-  headers: {
-    "Content-Type": "application/json; charset=utf-8",
-  },
-});
-} finally {
-console.log(
-`[${videoId || "Invalid URL"}] Request processed in ${(
-performance.now() - startTime
-).toFixed(2)}ms.`,
-);
-}
-},
-{
-  query: t.Object({
-    url: t.Optional(t.String()),
-    quality: t.Optional(t.String()),
-    format: t.Optional(t.String()),
-  }),
-},
-)
-.get(
-"/yt",
-async ({ query, request, set }) => {
-
-const startTime = performance.now();
-
-let videoId: string | null = null;
-
-try {
-  videoId = getVideoId(query.url);
-
-  if (!videoId) {
-    set.status = 400;
-    return {
-      success: false,
-      error: "Invalid or unsupported YouTube URL provided.",
-    };
-  }
-
-  return await handleVideoRequest(videoId, query, request, set, startTime);
-} catch (error) {
-set.status = 500;
-
-const payload = {
-  success: false,
-  error: error instanceof Error ? error.message : "Unknown error",
-  name: error instanceof Error ? error.name : "Error",
-  stack: error instanceof Error ? error.stack : undefined,
-  timestamp: new Date().toISOString(),
-};
-
-await Bun.write("./last-error.json", JSON.stringify(payload, null, 2));
-
-return new Response(JSON.stringify(payload, null, 2), {
-  headers: {
-    "Content-Type": "application/json; charset=utf-8",
-  },
-});
-} finally {
-console.log(
-`[${videoId || "Invalid URL"}] Request processed in ${(
-performance.now() - startTime
-).toFixed(2)}ms.`,
-);
-}
-},
-{
-  query: t.Object({
-    url: t.String(),
-    quality: t.Optional(t.String()),
-    format: t.Optional(t.String()),
-  }),
-},
-)
-.get(
-  "/g",
-  async ({ query, request, set }) => {
-    const prompt = query.prompt;
-    const mode = (query.mode as Mode) || "balanced";
-
-    if (!prompt) {
-      return {
-        status: "info",
-        message: "Provide ?prompt=...",
-        models: listModels(),
-      };
-    }
-
-    if (isDead()) {
-      set.status = 503;
+    if (!checkRateLimit(ip) || isSpam(request)) {
+      set.status = 429;
       return {
         status: "error",
-        message: "Cookies are dead. Replace api/gemini_cookies.json and call /g/reload.",
+        message: "Rate limit exceeded or spam detected",
       };
     }
 
-    const result =
-      mode === "deep_research"
-        ? await deepResearch(prompt, query.uid)
-        : await generate({ prompt, uid: query.uid, mode, model: query.model, system: query.system });
+    activeRequests++;
 
-    if ("error" in result) {
-      set.status = 502;
-      return { status: "fetch_error", error: result.error };
+    if (shutdownTimer) {
+      clearTimeout(shutdownTimer);
+      shutdownTimer = null;
+    }
+  })
+  .onAfterHandle(({ response, set }) => {
+    activeRequests = Math.max(0, activeRequests - 1);
+
+    if (restartScheduled && activeRequests === 0 && activeOperations === 0) {
+      scheduleIdleRestart();
     }
 
-    const requestUrl = new URL(request.url);
-    const protocol = request.headers.get("x-forwarded-proto") || requestUrl.protocol.replace(":", "");
-    const baseUrl = `${protocol}://${requestUrl.host}`;
+    if (
+      typeof response === "object" &&
+      response !== null &&
+      !(response instanceof Response)
+    ) {
+      set.headers["Content-Type"] = "application/json; charset=utf-8";
+    }
+  })
+  .onError(() => {
+    activeRequests = Math.max(0, activeRequests - 1);
 
-    return {
-      status: "success",
-      mode,
-      response: result.text,
-      thoughts: result.thoughts,
-      images: result.images.map((url) => `${baseUrl}/tunnel/${createImageTunnel(url)}`),
-      videos: result.videos,
-      audio: result.audio,
-      conversationId: result.conversationId,
-      responseId: result.responseId,
-    };
-  },
-  {
-    query: t.Object({
-      prompt: t.Optional(t.String()),
-      mode: t.Optional(t.String()),
-      model: t.Optional(t.String()),
-      uid: t.Optional(t.String()),
-      system: t.Optional(t.String()),
-    }),
-  },
-)
-.get(
-"/pin",
-async ({ query, request, set }) => {
+    if (restartScheduled && activeRequests === 0 && activeOperations === 0) {
+      scheduleIdleRestart();
+    }
+  })
+  .onStart(async () => {
+    await mkdir(TEMP_DIR_BASE, { recursive: true });
+    await mkdir(DOWNLOAD_DIR, { recursive: true });
 
-const clientId = getClientId(request);
+    setInterval(() => {
+      const now = Date.now();
 
-if (query.search) {
+      for (const [id, session] of tunnelSessions.entries()) {
+        if (session.expiryTimestamp <= now) {
+          tunnelSessions.delete(id);
+        }
+      }
 
-  const parsedLimit = Number.parseInt(
-  query.limit || query.count || "20",
-  10,
-  );
+      for (const [videoId, entry] of videoDataCache.entries()) {
+        if (entry.expiryTimestamp <= now) {
+          videoDataCache.delete(videoId);
+        }
+      }
 
-  const limit = Number.isFinite(parsedLimit)
-  ? Math.min(Math.max(parsedLimit, 1), 50)
-  : 20;
+      for (const [cacheKey, entry] of remuxedFileCache.entries()) {
+        if (!entry.expiryTimeoutId) {
+          void cleanupCachedFile(cacheKey);
+        }
+      }
+    }, 60 * 60 * 1000);
 
-  const result = await searchPinterest(query.search, clientId, limit);
+    console.log("API startup complete.");
+  })
+  .get("/admin", () => new Response(Bun.file("public/admin.html")))
+  .get("/admin/", () => new Response(Bun.file("public/admin.html")))
+  .group("/admin", (admin) =>
+    admin
+      .onBeforeHandle(({ request, set }) => {
+        if (!ADMIN_USER || !ADMIN_PASS) {
+          set.status = 500;
+          return {
+            success: false,
+            error: "Server admin credentials are not configured in .env",
+          };
+        }
 
-  if (result.status === "rate_limited") {
-    set.status = 429;
-    set.headers["Retry-After"] = "60";
-  }
+        const auth = request.headers.get("Authorization");
+        const expected = `Basic ${btoa(`${ADMIN_USER}:${ADMIN_PASS}`)}`;
 
-  return result;
-}
+        if (auth !== expected) {
+          set.status = 401;
+          return {
+            success: false,
+            error: "Unauthorized",
+          };
+        }
+      })
+      .get("/stats", () => {
+        const memory = process.memoryUsage();
+        const protection = ProtectionManager.getStats();
+        const uptimeHours = Math.floor(process.uptime() / 3600);
 
-if (query.url) {
+        return {
+          activeOperations,
+          activeRequests,
+          memoryUsage: formatBytes(memory.heapUsed),
+          blockedCount: protection.blockedCount,
+          activeRateLimitedIps: protection.activeRateLimitedIps,
+          uptime: `${uptimeHours}h`,
+        };
+      })
+      .post("/block", ({ body, set }: any) => {
+        if (!body?.ip) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "No IP provided",
+          };
+        }
 
-  const result = await pinHandler(query.url, clientId);
+        ProtectionManager.blockIp(body.ip);
 
-  if (result.status === "rate_limited") {
-    set.status = 429;
-    set.headers["Retry-After"] = "60";
-  }
+        return {
+          success: true,
+          message: `IP ${body.ip} blocked`,
+        };
+      })
+      .post("/unblock", ({ body, set }: any) => {
+        if (!body?.ip) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "No IP provided",
+          };
+        }
 
-  return result;
-}
+        ProtectionManager.unblockIp(body.ip);
 
-set.status = 400;
+        return {
+          success: true,
+          message: `IP ${body.ip} unblocked`,
+        };
+      })
+      .post("/clear-cache", async () => {
+        const fileEntries = [...remuxedFileCache.entries()];
 
-return {
-  status: "error",
-  error: "Missing required parameter.",
-};
-},
-{
-  query: t.Object({
-    url: t.Optional(t.String()),
-    search: t.Optional(t.String()),
-    limit: t.Optional(t.String()),
-    count: t.Optional(t.String()),
-  }),
-},
-)
-.get(
-"/instav2",
-async ({ query }) => {
-return instav2Handler(query.url);
-},
-{
-  query: t.Object({
-    url: t.String(),
-  }),
-},
-)
-.get(
-"/fb",
-async ({ query }) => {
-return fbHandler(query.url);
-},
-{
-  query: t.Object({
-    url: t.String(),
-  }),
-},
-)
-.get(
-"/tt",
-async ({ query }) => {
-return ttHandler(query.url);
-},
-{
-  query: t.Object({
-    url: t.String(),
-  }),
-},
-)
-.get(
-"/x",
-async ({ query }) => {
-return xHandler(query.url);
-},
-{
-  query: t.Object({
-    url: t.String(),
-  }),
-},
-)
-.get(
-"/search",
-async ({ query, request, set }) => {
+        for (const [cacheKey] of fileEntries) {
+          await cleanupCachedFile(cacheKey);
+        }
 
-const startTime = performance.now();
+        const searches = searchCache.size;
+        searchCache.clear();
+        videoDataCache.clear();
 
-try {
+        return {
+          success: true,
+          message: `Cleared ${fileEntries.length} files and ${searches} search entries.`,
+        };
+      })
+      .post("/restart-timer", () => {
+        restartScheduled = true;
+        scheduleIdleRestart();
 
-  const { results, fetchTime, cacheHit } = await getOrFetchSearchResults(
-  query.q,
-  );
+        return {
+          success: true,
+          message: "Idle restart timer scheduled.",
+        };
+      }),
+  )
+  .get("/api/stats", () => getSystemStats())
+  .get("/api/ip", async ({ request }) => getIpInfo(getIp(request)))
+  .get("/api/device", ({ request }) => getDeviceInfo(request))
+  .get(
+    "/robots.txt",
+    () =>
+      new Response(["User-agent: *", "Disallow: /"].join("\n"), {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      }),
+  )
+  .get(
+    "/",
+    async ({ query, request, set }) => {
+      if (!query.url) {
+        return new Response(Bun.file("public/home.html"));
+      }
 
-  if (results.length === 0) {
-    set.status = 404;
+      const startTime = performance.now();
+      let videoId: string | null = null;
 
-    return {
-      success: false,
-      error: `No video results found for "${query.q}".`,
-    };
-  }
+      try {
+        videoId = getVideoId(query.url);
 
-  if (query.num) {
+        if (!videoId) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "Invalid or unsupported YouTube URL provided.",
+          };
+        }
 
-    const desired =
-    query.num.toLowerCase() === "all"
-    ? results
-    : results.slice(
-    0,
-    Math.max(1, Number.parseInt(query.num, 10) || 10),
-    );
+        return await handleVideoRequest(
+          videoId,
+          {
+            url: query.url,
+            quality: query.quality,
+            format: query.format,
+          },
+          request,
+          set,
+          startTime,
+        );
+      } catch (error) {
+        set.status = 500;
 
-    set.headers["Content-Type"] = "application/json; charset=utf-8";
+        const payload = {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+          name: error instanceof Error ? error.name : "Error",
+          stack: error instanceof Error ? error.stack : undefined,
+          timestamp: new Date().toISOString(),
+        };
 
-    return new Response(
-    JSON.stringify(
+        await Bun.write("./last-error.json", JSON.stringify(payload, null, 2));
+
+        return new Response(JSON.stringify(payload, null, 2), {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+          },
+        });
+      } finally {
+        console.log(
+          `[${videoId || "Invalid URL"}] Request processed in ${(
+            performance.now() - startTime
+          ).toFixed(2)}ms.`,
+        );
+      }
+    },
     {
-      success: true,
-      infoFetchTime: `${fetchTime.toFixed(2)}ms`,
-      cache: cacheHit,
-      results: desired,
+      query: t.Object({
+        url: t.Optional(t.String()),
+        quality: t.Optional(t.String()),
+        format: t.Optional(t.String()),
+      }),
     },
-    null,
-    2,
-    ),
-    );
-  }
+  )
+  .get(
+    "/yt",
+    async ({ query, request, set }) => {
+      const startTime = performance.now();
+      let videoId: string | null = null;
 
-  const videoId = results[0].videoId;
+      try {
+        videoId = getVideoId(query.url);
 
-  return await handleVideoRequest(
-  videoId,
-  {
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    quality: query.quality,
-    format: query.format,
-  },
-  request,
-  set,
-  startTime,
-  );
-} catch (error) {
-set.status = 500;
+        if (!videoId) {
+          set.status = 400;
+          return {
+            success: false,
+            error: "Invalid or unsupported YouTube URL provided.",
+          };
+        }
 
-return {
-  success: false,
-  error: error instanceof Error ? error.message : "Search failed.",
-};
-}
-},
-{
-  query: t.Object({
-    q: t.String(),
-    quality: t.Optional(t.String()),
-    format: t.Optional(t.String()),
-    num: t.Optional(t.String()),
-  }),
-},
-)
-.get(
-"/music",
-async ({ query, request, set }) => {
+        return await handleVideoRequest(videoId, query, request, set, startTime);
+      } catch (error) {
+        set.status = 500;
 
-const startTime = performance.now();
+        const payload = {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+          name: error instanceof Error ? error.name : "Error",
+          stack: error instanceof Error ? error.stack : undefined,
+          timestamp: new Date().toISOString(),
+        };
 
-try {
+        await Bun.write("./last-error.json", JSON.stringify(payload, null, 2));
 
-  const search = await innertube.music.search(query.q, { type: "song" });
-
-  const song = search.songs?.contents.find(
-  (item) =>
-  (item.item_type === "song" || item.item_type === "video") &&
-  typeof item.id === "string",
-  );
-
-  const videoId = song?.id;
-
-  if (
-  typeof videoId !== "string" ||
-  !/^[a-zA-Z0-9_-]{11}$/.test(videoId)
-  ) {
-    set.status = 404;
-
-    return {
-      success: false,
-      error: `No song results found for "${query.q}".`,
-    };
-  }
-
-  return await handleVideoRequest(
-  videoId,
-  {
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    quality: query.quality,
-    format: query.format,
-  },
-  request,
-  set,
-  startTime,
-  );
-} catch (error) {
-set.status = 500;
-
-return {
-  success: false,
-  error:
-  error instanceof Error ? error.message : "Music search failed.",
-};
-}
-},
-{
-  query: t.Object({
-    q: t.String(),
-    quality: t.Optional(t.String()),
-    format: t.Optional(t.String()),
-  }),
-},
-)
-.get(
-"/tunnel/:tunnelId",
-async ({ params, set }) => {
-
-const startTime = performance.now();
-
-const session = tunnelSessions.get(params.tunnelId);
-
-if (!session || session.expiryTimestamp <= Date.now()) {
-  tunnelSessions.delete(params.tunnelId);
-  set.status = 404;
-
-  return {
-    success: false,
-    error: "Download link not found or expired. Please generate a new one.",
-  };
-}
-
-const isAudioOnly = !session.chosenVideoFormat;
-
-const cacheKey = isAudioOnly
-? `${session.videoId}-audio-only`
-: `${session.videoId}-${session.itag}`;
-
-activeOperations++;
-
-try {
-
-  const cachedFile = await getOrStartDownload(
-  session,
-  cacheKey,
-  isAudioOnly,
-  );
-
-  const file = Bun.file(cachedFile.filePath);
-
-  if (!(await file.exists())) {
-    remuxedFileCache.delete(cacheKey);
-    throw new Error("Generated download file no longer exists.");
-  }
-
-  const mimeType = isAudioOnly
-  ? cachedFile.filename.endsWith(".webm")
-  ? "audio/webm"
-  : "audio/mp4"
-  : "video/mp4";
-
-  console.log(
-  `[${cacheKey}] Download prepared in ${(
-  performance.now() - startTime
-  ).toFixed(2)}ms.`,
-  );
-
-  return new Response(file, {
-    headers: {
-      "Content-Disposition": createContentDisposition(cachedFile.filename),
-      "Content-Type": mimeType,
-      "Content-Length": file.size.toString(),
+        return new Response(JSON.stringify(payload, null, 2), {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+          },
+        });
+      } finally {
+        console.log(
+          `[${videoId || "Invalid URL"}] Request processed in ${(
+            performance.now() - startTime
+          ).toFixed(2)}ms.`,
+        );
+      }
     },
-  });
-} catch (error) {
-activeDownloads.delete(cacheKey);
-set.status = 500;
+    {
+      query: t.Object({
+        url: t.String(),
+        quality: t.Optional(t.String()),
+        format: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get(
+    "/g",
+    async ({ query, request, set }) => {
+      const prompt = query.prompt;
+      const mode = (query.mode as Mode) || "balanced";
 
-return {
-  success: false,
-  error: `Failed to process stream: ${
-    error instanceof Error ? error.message : String(error)
-  }`,
-};
-} finally {
-activeOperations = Math.max(0, activeOperations - 1);
+      if (!prompt) {
+        return {
+          status: "info",
+          message: "Provide ?prompt=...",
+          models: listModels(),
+        };
+      }
 
-if (restartScheduled && activeOperations === 0 && activeRequests === 0) {
-  scheduleIdleRestart();
-}
-}
-},
-{
-  params: t.Object({
-    tunnelId: t.String(),
-  }),
-},
-)
-.listen(PORT);
+      if (isDead()) {
+        set.status = 503;
+        return {
+          status: "error",
+          message:
+            "Cookies are dead. Replace api/gemini_cookies.json and call /g/reload.",
+        };
+      }
+
+      const result =
+        mode === "deep_research"
+          ? await deepResearch(prompt, query.uid)
+          : await generate({
+              prompt,
+              uid: query.uid,
+              mode,
+              model: query.model,
+              system: query.system,
+            });
+
+      if ("error" in result) {
+        set.status = 502;
+        return { status: "fetch_error", error: result.error };
+      }
+
+      const requestUrl = new URL(request.url);
+      const protocol =
+        request.headers.get("x-forwarded-proto") ||
+        requestUrl.protocol.replace(":", "");
+      const baseUrl = `${protocol}://${requestUrl.host}`;
+
+      return {
+        status: "success",
+        mode,
+        response: result.text,
+        thoughts: result.thoughts,
+        images: result.images.map(
+          (url) => `${baseUrl}/tunnel/${createImageTunnel(url)}`,
+        ),
+        videos: result.videos,
+        audio: result.audio,
+        conversationId: result.conversationId,
+        responseId: result.responseId,
+      };
+    },
+    {
+      query: t.Object({
+        prompt: t.Optional(t.String()),
+        mode: t.Optional(t.String()),
+        model: t.Optional(t.String()),
+        uid: t.Optional(t.String()),
+        system: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get(
+    "/pin",
+    async ({ query, request, set }) => {
+      const clientId = getClientId(request);
+
+      if (query.search) {
+        const parsedLimit = Number.parseInt(
+          query.limit || query.count || "20",
+          10,
+        );
+        const limit = Number.isFinite(parsedLimit)
+          ? Math.min(Math.max(parsedLimit, 1), 50)
+          : 20;
+        const result = await searchPinterest(query.search, clientId, limit);
+
+        if (result.status === "rate_limited") {
+          set.status = 429;
+          set.headers["Retry-After"] = "60";
+        }
+
+        return result;
+      }
+
+      if (query.url) {
+        const result = await pinHandler(query.url, clientId);
+
+        if (result.status === "rate_limited") {
+          set.status = 429;
+          set.headers["Retry-After"] = "60";
+        }
+
+        return result;
+      }
+
+      set.status = 400;
+      return {
+        status: "error",
+        error: "Missing required parameter.",
+      };
+    },
+    {
+      query: t.Object({
+        url: t.Optional(t.String()),
+        search: t.Optional(t.String()),
+        limit: t.Optional(t.String()),
+        count: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get(
+    "/instav2",
+    async ({ query }) => instav2Handler(query.url),
+    {
+      query: t.Object({
+        url: t.String(),
+      }),
+    },
+  )
+  .get(
+    "/fb",
+    async ({ query }) => fbHandler(query.url),
+    {
+      query: t.Object({
+        url: t.String(),
+      }),
+    },
+  )
+  .get(
+    "/tt",
+    async ({ query }) => ttHandler(query.url),
+    {
+      query: t.Object({
+        url: t.String(),
+      }),
+    },
+  )
+  .get(
+    "/x",
+    async ({ query }) => xHandler(query.url),
+    {
+      query: t.Object({
+        url: t.String(),
+      }),
+    },
+  )
+  .get(
+    "/search",
+    async ({ query, request, set }) => {
+      const startTime = performance.now();
+
+      try {
+        const { results, fetchTime, cacheHit } = await getOrFetchSearchResults(
+          query.q,
+        );
+
+        if (results.length === 0) {
+          set.status = 404;
+          return {
+            success: false,
+            error: `No video results found for "${query.q}".`,
+          };
+        }
+
+        if (query.num) {
+          const desired =
+            query.num.toLowerCase() === "all"
+              ? results
+              : results.slice(
+                  0,
+                  Math.max(1, Number.parseInt(query.num, 10) || 10),
+                );
+
+          set.headers["Content-Type"] = "application/json; charset=utf-8";
+
+          return new Response(
+            JSON.stringify(
+              {
+                success: true,
+                infoFetchTime: `${fetchTime.toFixed(2)}ms`,
+                cache: cacheHit,
+                results: desired,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+
+        const videoId = results[0].videoId;
+
+        return await handleVideoRequest(
+          videoId,
+          {
+            url: `https://www.youtube.com/watch?v=${videoId}`,
+            quality: query.quality,
+            format: query.format,
+          },
+          request,
+          set,
+          startTime,
+        );
+      } catch (error) {
+        set.status = 500;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Search failed.",
+        };
+      }
+    },
+    {
+      query: t.Object({
+        q: t.String(),
+        quality: t.Optional(t.String()),
+        format: t.Optional(t.String()),
+        num: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get(
+    "/music",
+    async ({ query, request, set }) => {
+      const startTime = performance.now();
+
+      try {
+        const search = await innertube.music.search(query.q, { type: "song" });
+        const song = search.songs?.contents.find(
+          (item) =>
+            (item.item_type === "song" || item.item_type === "video") &&
+            typeof item.id === "string",
+        );
+        const videoId = song?.id;
+
+        if (
+          typeof videoId !== "string" ||
+          !/^[a-zA-Z0-9_-]{11}$/.test(videoId)
+        ) {
+          set.status = 404;
+          return {
+            success: false,
+            error: `No song results found for "${query.q}".`,
+          };
+        }
+
+        return await handleVideoRequest(
+          videoId,
+          {
+            url: `https://www.youtube.com/watch?v=${videoId}`,
+            quality: query.quality,
+            format: query.format,
+          },
+          request,
+          set,
+          startTime,
+        );
+      } catch (error) {
+        set.status = 500;
+        return {
+          success: false,
+          error:
+            error instanceof Error ? error.message : "Music search failed.",
+        };
+      }
+    },
+    {
+      query: t.Object({
+        q: t.String(),
+        quality: t.Optional(t.String()),
+        format: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get(
+    "/tunnel/:tunnelId",
+    async ({ params, set }) => {
+      const imageResponse = await streamImageTunnel(params.tunnelId);
+      if (imageResponse) return imageResponse;
+
+      const startTime = performance.now();
+      const session = tunnelSessions.get(params.tunnelId);
+
+      if (!session || session.expiryTimestamp <= Date.now()) {
+        tunnelSessions.delete(params.tunnelId);
+        set.status = 404;
+        return {
+          success: false,
+          error: "Download link not found or expired. Please generate a new one.",
+        };
+      }
+
+      const isAudioOnly = !session.chosenVideoFormat;
+      const cacheKey = isAudioOnly
+        ? `${session.videoId}-audio-only`
+        : `${session.videoId}-${session.itag}`;
+
+      activeOperations++;
+
+      try {
+        const cachedFile = await getOrStartDownload(
+          session,
+          cacheKey,
+          isAudioOnly,
+        );
+        const file = Bun.file(cachedFile.filePath);
+
+        if (!(await file.exists())) {
+          remuxedFileCache.delete(cacheKey);
+          throw new Error("Generated download file no longer exists.");
+        }
+
+        const mimeType = isAudioOnly
+          ? cachedFile.filename.endsWith(".webm")
+            ? "audio/webm"
+            : "audio/mp4"
+          : "video/mp4";
+
+        console.log(
+          `[${cacheKey}] Download prepared in ${(
+            performance.now() - startTime
+          ).toFixed(2)}ms.`,
+        );
+
+        return new Response(file, {
+          headers: {
+            "Content-Disposition": createContentDisposition(cachedFile.filename),
+            "Content-Type": mimeType,
+            "Content-Length": file.size.toString(),
+          },
+        });
+      } catch (error) {
+        activeDownloads.delete(cacheKey);
+        set.status = 500;
+        return {
+          success: false,
+          error: `Failed to process stream: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      } finally {
+        activeOperations = Math.max(0, activeOperations - 1);
+
+        if (restartScheduled && activeOperations === 0 && activeRequests === 0) {
+          scheduleIdleRestart();
+        }
+      }
+    },
+    {
+      params: t.Object({
+        tunnelId: t.String(),
+      }),
+    },
+  )
+  .listen(PORT);
 
 process.on("SIGINT", () => {
   restartScheduled = true;
@@ -2378,5 +2169,5 @@ process.on("SIGTERM", () => {
 });
 
 console.log(
-`Multi-Format Downloader API is running at http://${app.server?.hostname}:${app.server?.port}`,
+  `Multi-Format Downloader API is running at http://${app.server?.hostname}:${app.server?.port}`,
 );
