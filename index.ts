@@ -34,7 +34,7 @@ import {
   listModels,
 
   type Mode,
-} from "./gemini";
+} from "./api/gemini";
 import instav2Handler from "./api/instav2";
 import fbHandler from "./api/fb";
 import pinHandler, {
